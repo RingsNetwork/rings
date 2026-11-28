@@ -88,8 +88,8 @@ PAPER_SPECS: tuple[PaperSpec, ...] = (
         pdf_file="rings.pdf",
         download_name="rings-whitepaper-1.0.pdf",
         published="2023-02-08",
-        updated="2026-11-27",
-        pages=22,
+        updated="2026-11-28",
+        pages=23,
         roman_sections=True,
         tags=(
             "Chord DHT",
@@ -98,6 +98,7 @@ PAPER_SPECS: tuple[PaperSpec, ...] = (
             "Crash Consistency",
             "SlotRoster Admission",
             "Sphinx & AEZ v5",
+            "TURN Onion Relay",
             "Stateright Verification",
         ),
         bibtex_key="rings-whitepaper-2026",
@@ -363,29 +364,6 @@ def clean_bib_text(text: str) -> str:
     return escaped
 
 
-def normalize_math_for_katex(math_tex: str) -> str:
-    """Normalize custom LaTeX macros inside math mode so KaTeX renders cleanly."""
-
-    out = math_tex
-    out = out.replace("\\allowbreak", "")
-    out = out.replace("\\llbracket", "[\\![")
-    out = out.replace("\\rrbracket", "]\\!]")
-    out = out.replace("\\mbox{-}", "\\text{-}")
-    out = re.sub(r"\\mbox\{([^}]*)\}", r"\\text{\1}", out)
-
-    while True:
-        idx = out.find("\\code{")
-        if idx < 0:
-            break
-        grp = find_brace_group(out, idx + 5)
-        if not grp:
-            break
-        inner, end_idx = grp
-        out = out[:idx] + "\\texttt{" + inner + "}" + out[end_idx:]
-
-    return out.strip()
-
-
 def sanitize_anchor(label: str) -> str:
     """Map a LaTeX label to a safe HTML id."""
 
@@ -409,6 +387,65 @@ class CompilerContext:
             self.cited_order.append(key)
             self.cited_num[key] = len(self.cited_order)
         return self.cited_num[key]
+
+
+def smallcaps_math(word: str) -> str:
+    """Render `\\textsc{Word}` inside KaTeX math mode as true typographic small caps."""
+
+    w = word.strip()
+    if not w:
+        return ""
+    if len(w) == 1:
+        return f"\\mathrm{{{w.upper()}}}"
+    head = w[0].upper()
+    tail = w[1:].upper()
+    return f"\\mathrm{{{head}{{\\scriptstyle {tail}}}}}"
+
+
+def normalize_math_for_katex(math_tex: str, ctx: CompilerContext | None = None) -> str:
+    """Normalize custom LaTeX macros, citations, and cross-references inside math mode for KaTeX."""
+
+    out = math_tex
+    out = re.sub(r"\\label\{[^}]*\}", "", out)
+    out = re.sub(r"\\allowbreak(?:\{\}|\s*)", "", out)
+    out = out.replace("\\llbracket", "[\\![")
+    out = out.replace("\\rrbracket", "]\\!]")
+    out = out.replace("\\mbox{-}", "\\text{-}")
+    out = re.sub(r"\\mbox\{([^}]*)\}", r"\\text{\1}", out)
+
+    if ctx is not None:
+        def math_cite(inner: str) -> str:
+            keys = [k.strip() for k in inner.split(",") if k.strip()]
+            if not keys:
+                return ""
+            parts = [
+                f"\\href{{#bib-{sanitize_anchor(k)}}}{{\\text{{{ctx.cite_number(k)}}}}}"
+                for k in keys
+            ]
+            return f"\\text{{[}}{',\\,'.join(parts)}\\text{{]}}"
+
+        def math_eqref(inner: str) -> str:
+            lbl = inner.strip()
+            info = ctx.labels.get(lbl)
+            disp = info[1] if info else lbl
+            return f"\\href{{#{sanitize_anchor(lbl)}}}{{\\text{{({disp})}}}}"
+
+        def math_ref(inner: str) -> str:
+            lbl = inner.strip()
+            info = ctx.labels.get(lbl)
+            disp = info[1] if info else lbl
+            return f"\\href{{#{sanitize_anchor(lbl)}}}{{\\text{{{disp}}}}}"
+
+        out = re.sub(r"~(?=\\(?:cite|eqref|ref)\{)", r"\\ ", out)
+        out = replace_command_1arg(out, "cite", math_cite)
+        out = replace_command_1arg(out, "eqref", math_eqref)
+        out = replace_command_1arg(out, "ref", math_ref)
+
+    out = replace_command_1arg(out, "textsc", smallcaps_math)
+    out = replace_command_1arg(out, "emph", lambda s: f"\\textit{{{s}}}")
+    out = replace_command_1arg(out, "code", lambda s: f"\\texttt{{{s}}}")
+
+    return out.strip()
 
 
 def extract_label(text: str) -> tuple[str | None, str]:
@@ -448,8 +485,8 @@ def replace_command_1arg(text: str, cmd: str, transform) -> str:
     return "".join(out)
 
 
-def replace_href(text: str, render_inner) -> str:
-    """Replace `\\href{url}{label}` using balanced brace matching."""
+def replace_href(text: str, render_inner, stash_fn) -> str:
+    """Replace `\\href{url}{label}` using balanced brace matching and stash the resulting anchor."""
 
     needle = "\\href{"
     pos = 0
@@ -475,14 +512,16 @@ def replace_href(text: str, render_inner) -> str:
         label, end_idx = g2
         url_clean = url.replace("\\_", "_").replace("\\%", "%").strip()
         out.append(
-            f'<a href="{html.escape(url_clean, quote=True)}" target="_blank" rel="noreferrer">{render_inner(label)}</a>'
+            stash_fn(
+                f'<a href="{html.escape(url_clean, quote=True)}" target="_blank" rel="noreferrer">{render_inner(label)}</a>'
+            )
         )
         pos = end_idx
     return "".join(out)
 
 
-def stash_inline_math(text: str, math_stash: list[str]) -> str:
-    """Extract `$...$` and `\\(...\\)` spans before HTML escaping."""
+def stash_inline_math(text: str, stash_fn, ctx: CompilerContext) -> str:
+    """Extract `$...$` (respecting nested `{...}` braces) and `\\(...\\)` spans into the unified HTML stash."""
 
     out: list[str] = []
     i = 0
@@ -491,10 +530,8 @@ def stash_inline_math(text: str, math_stash: list[str]) -> str:
         if text[i] == "\\" and i + 1 < n and text[i + 1] == "(":
             end = text.find("\\)", i + 2)
             if end >= 0:
-                idx = len(math_stash)
-                norm = normalize_math_for_katex(text[i + 2 : end])
-                math_stash.append(f'<span class="paper-math-inline">\\({html.escape(norm)}\\)</span>')
-                out.append(f"\x00MATH{idx}\x00")
+                norm = normalize_math_for_katex(text[i + 2 : end], ctx)
+                out.append(stash_fn(f'<span class="paper-math-inline">\\({html.escape(norm)}\\)</span>'))
                 i = end + 2
                 continue
         if text[i] == "\\" and i + 1 < n and text[i + 1] == "$":
@@ -503,18 +540,21 @@ def stash_inline_math(text: str, math_stash: list[str]) -> str:
             continue
         if text[i] == "$" and (i + 1 >= n or text[i + 1] != "$"):
             j = i + 1
+            brace_depth = 0
             while j < n:
                 if text[j] == "\\":
                     j += 2
                     continue
-                if text[j] == "$":
+                if text[j] == "{":
+                    brace_depth += 1
+                elif text[j] == "}":
+                    brace_depth = max(0, brace_depth - 1)
+                elif text[j] == "$" and brace_depth == 0:
                     break
                 j += 1
             if j < n and text[j] == "$":
-                idx = len(math_stash)
-                norm = normalize_math_for_katex(text[i + 1 : j])
-                math_stash.append(f'<span class="paper-math-inline">\\({html.escape(norm)}\\)</span>')
-                out.append(f"\x00MATH{idx}\x00")
+                norm = normalize_math_for_katex(text[i + 1 : j], ctx)
+                out.append(stash_fn(f'<span class="paper-math-inline">\\({html.escape(norm)}\\)</span>'))
                 i = j + 1
                 continue
         out.append(text[i])
@@ -591,15 +631,14 @@ def render_inline_latex(text: str, ctx: CompilerContext) -> str:
         )
 
     text = replace_command_1arg(text, "url", render_url)
-    text = replace_href(text, lambda s: put_stash(render_inline_latex(s, ctx)))
+    text = replace_href(text, lambda s: render_inline_latex(s, ctx), put_stash)
 
-    # Code / monospace commands BEFORE inline math so `\code{...}` outside math becomes `<code>`
-    math_stash: list[str] = []
-    text = stash_inline_math(text, math_stash)
+    # Stash inline math into the SAME `html_stash` before `\code`/`\textbf`/`\emph` wrappers
+    text = stash_inline_math(text, put_stash, ctx)
 
     def render_code(inner: str) -> str:
         clean = (
-            inner.replace("\\allowbreak", "")
+            re.sub(r"\\allowbreak(?:\{\}|\s*)", "", inner)
             .replace("\\_", "_")
             .replace("\\{", "{")
             .replace("\\}", "}")
@@ -626,6 +665,7 @@ def render_inline_latex(text: str, ctx: CompilerContext) -> str:
     text = re.sub(r"\\vspace\*?\{[^}]*\}", "", text)
     text = re.sub(r"\\hspace\*?\{[^}]*\}", " ", text)
     text = text.replace("\\qquad", "\u2003\u2003").replace("\\quad", "\u2003")
+    text = text.replace("\\,", "\u202f").replace("\\;", " ").replace("\\:", " ").replace("\\!", "").replace("\\/", "")
 
     # Typographic ligatures and escapes
     text = text.replace("---", "—").replace("--", "–")
@@ -637,9 +677,7 @@ def render_inline_latex(text: str, ctx: CompilerContext) -> str:
     text = text.replace("{", "").replace("}", "")
 
     escaped = html.escape(text, quote=False)
-    # Restore stashes (in reverse order in case of nested stashes)
-    for idx in range(len(math_stash) - 1, -1, -1):
-        escaped = escaped.replace(f"\x00MATH{idx}\x00", math_stash[idx])
+    # Restore unified stash in reverse topological order
     for idx in range(len(html_stash) - 1, -1, -1):
         escaped = escaped.replace(f"\x00HTML{idx}\x00", html_stash[idx])
     return escaped.strip()
@@ -1194,13 +1232,13 @@ def render_diagram_svg(label: str) -> str:
         return "".join(lines)
 
     if label == "wasm-boundary":
-        cols = [(75, "Browser Host", "(WebRTC / IDB)"), (250, "JS FFI Bridge", "(cap-checked I_X)"), (425, "Wasm Core", "(rings-core step)")]
+        cols = [(75, "Browser Host", "(WebRTC / IDB)"), (250, "JS FFI Bridge", "(cap-checked Iₓ)"), (425, "Wasm Core", "(rings-core step)")]
         msgs = [
             (75, 250, "Load & init"),
             (250, 425, "Instantiate"),
             (75, 250, "Net / timer event"),
             (250, 425, "step(S, i)"),
-            (425, 250, "Effects A_X*"),
+            (425, 250, "Effects Aₓ*"),
             (250, 75, "Permitted IO"),
         ]
         out = [
@@ -1294,14 +1332,14 @@ def render_diagram_svg(label: str) -> str:
         return (
             '<svg viewBox="0 0 460 150" width="460" height="150" role="img" aria-label="DRanking epoch cycle">'
             '<defs><marker id="carr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 1 L 10 5 L 0 9 z" fill="#101828"/></marker></defs>'
-            '<rect x="20" y="20" width="76" height="30" rx="5" fill="#fffaf0" stroke="#101828"/><text x="58" y="39" text-anchor="middle" font-size="12" font-weight="700" fill="#101828">W_k</text>'
+            '<rect x="20" y="20" width="76" height="30" rx="5" fill="#fffaf0" stroke="#101828"/><text x="58" y="39" text-anchor="middle" font-size="12" font-weight="700" fill="#101828">W<tspan dy="3" font-size="8.5">k</tspan></text>'
             '<rect x="135" y="20" width="76" height="30" rx="5" fill="#fffaf0" stroke="#101828"/><text x="173" y="39" text-anchor="middle" font-size="12" font-weight="700" fill="#101828">F</text>'
-            '<rect x="250" y="20" width="76" height="30" rx="5" fill="#fffaf0" stroke="#101828"/><text x="288" y="39" text-anchor="middle" font-size="12" font-weight="700" fill="#101828">t_{k+1}</text>'
-            '<rect x="365" y="20" width="76" height="30" rx="5" fill="#fffaf0" stroke="#101828"/><text x="403" y="39" text-anchor="middle" font-size="12" font-weight="700" fill="#101828">Σ_{k+1}</text>'
-            '<rect x="20" y="92" width="76" height="30" rx="5" fill="#fff8ee" stroke="#b42318"/><text x="58" y="111" text-anchor="middle" font-size="12" font-weight="700" fill="#101828">B_{k+1}</text>'
+            '<rect x="250" y="20" width="76" height="30" rx="5" fill="#fffaf0" stroke="#101828"/><text x="288" y="39" text-anchor="middle" font-size="12" font-weight="700" fill="#101828">t<tspan dy="3" font-size="8.5">k+1</tspan></text>'
+            '<rect x="365" y="20" width="76" height="30" rx="5" fill="#fffaf0" stroke="#101828"/><text x="403" y="39" text-anchor="middle" font-size="12" font-weight="700" fill="#101828">Σ<tspan dy="3" font-size="8.5">k+1</tspan></text>'
+            '<rect x="20" y="92" width="76" height="30" rx="5" fill="#fff8ee" stroke="#b42318"/><text x="58" y="111" text-anchor="middle" font-size="12" font-weight="700" fill="#101828">B<tspan dy="3" font-size="8.5">k+1</tspan></text>'
             '<rect x="135" y="92" width="76" height="30" rx="5" fill="#fff8ee" stroke="#b42318"/><text x="173" y="111" text-anchor="middle" font-size="12" font-weight="700" fill="#101828">sortition</text>'
             '<rect x="250" y="92" width="76" height="30" rx="5" fill="#fff8ee" stroke="#b42318"/><text x="288" y="111" text-anchor="middle" font-size="12" font-weight="700" fill="#101828">committee</text>'
-            '<rect x="365" y="92" width="76" height="30" rx="5" fill="#fff8ee" stroke="#b42318"/><text x="403" y="111" text-anchor="middle" font-size="12" font-weight="700" fill="#101828">QC_{2/3}</text>'
+            '<rect x="365" y="92" width="76" height="30" rx="5" fill="#fff8ee" stroke="#b42318"/><text x="403" y="111" text-anchor="middle" font-size="12" font-weight="700" fill="#101828">QC<tspan dy="3" font-size="8.5">2/3</tspan></text>'
             '<line x1="96" y1="35" x2="133" y2="35" stroke="#101828" stroke-width="1.3" marker-end="url(#carr)"/>'
             '<line x1="211" y1="35" x2="248" y2="35" stroke="#101828" stroke-width="1.3" marker-end="url(#carr)"/>'
             '<line x1="326" y1="35" x2="363" y2="35" stroke="#101828" stroke-width="1.3" marker-end="url(#carr)"/>'
@@ -1549,7 +1587,7 @@ def render_blocks(text: str, ctx: CompilerContext, counters: BlockCounters | Non
             end_m = text.find("\\]", m.end())
             if end_m < 0:
                 end_m = n
-            math_raw = normalize_math_for_katex(text[m.end() : end_m])
+            math_raw = normalize_math_for_katex(text[m.end() : end_m], ctx)
             chunks.append(f'<div class="paper-math-display">\\[{html.escape(math_raw)}\\]</div>')
             pos = end_m + 2
             continue
@@ -1633,14 +1671,14 @@ def render_blocks(text: str, ctx: CompilerContext, counters: BlockCounters | Non
             counters.eq += 1
             lbl, eq_body = extract_label(inner)
             anchor_id = sanitize_anchor(lbl) if lbl else f"eq-{counters.eq}"
-            norm = normalize_math_for_katex(eq_body)
+            norm = normalize_math_for_katex(eq_body, ctx)
             chunks.append(
                 f'<div class="paper-eq-row" id="{anchor_id}">'
                 f'<div class="paper-math-display">\\[{html.escape(norm)}\\]</div>'
                 f'<span class="paper-eq-num">({counters.eq})</span></div>'
             )
         elif env == "align*":
-            norm = normalize_math_for_katex(f"\\begin{{aligned}}{inner}\\end{{aligned}}")
+            norm = normalize_math_for_katex(f"\\begin{{aligned}}{inner}\\end{{aligned}}", ctx)
             chunks.append(f'<div class="paper-math-display">\\[{html.escape(norm)}\\]</div>')
         elif base_env == "table":
             counters.tab += 1
@@ -1755,6 +1793,39 @@ def render_bibliography_html(ctx: CompilerContext) -> str:
     )
 
 
+def html_to_plain_summary(rendered_html: str) -> str:
+    """Convert rendered HTML containing `\\(...\\)` spans into clean plain text for SEO/JSON-LD/Markdown."""
+
+    text = html.unescape(re.sub(r"<[^>]+>", "", rendered_html))
+
+    def simplify_math(m: re.Match[str]) -> str:
+        expr = m.group(1)
+        expr = re.sub(r"\\href\{#[^}]*\}\{([^}]*)\}", r"\1", expr)
+        expr = re.sub(r"\\(?:mathbb|mathsf|mathcal|mathbf|mathrm|mathit|mathtt|operatorname|text|textit|texttt)\{([^}]*)\}", r"\1", expr)
+        expr = (
+            expr.replace("\\times", "×")
+            .replace("\\le", "≤")
+            .replace("\\leq", "≤")
+            .replace("\\ge", "≥")
+            .replace("\\geq", "≥")
+            .replace("\\cap", "∩")
+            .replace("\\cup", "∪")
+            .replace("\\circ", "∘")
+            .replace("\\varnothing", "∅")
+            .replace("\\alpha", "α")
+            .replace("\\Omega", "Ω")
+            .replace("\\Pi", "Π")
+            .replace("\\,", "")
+        )
+        expr = re.sub(r"\\[A-Za-z]+", "", expr)
+        expr = expr.replace("{", "").replace("}", "")
+        return expr
+
+    text = re.sub(r"\\\((.*?)\\\)", simplify_math, text, flags=re.S)
+    text = re.sub(r"\\\[(.*?)\\\]", simplify_math, text, flags=re.S)
+    return " ".join(text.split())
+
+
 def compile_paper(spec: PaperSpec, papers_dir: Path = PAPERS_SOURCE_DIR) -> ParsedPaper:
     """Compile one `.tex` + `.bib` specification into a `ParsedPaper`."""
 
@@ -1796,34 +1867,35 @@ def compile_paper(spec: PaperSpec, papers_dir: Path = PAPERS_SOURCE_DIR) -> Pars
     body = re.sub(r"\\bibliographystyle\{[^}]*\}", "", body)
     body = re.sub(r"\\bibliography\{[^}]*\}", "", body)
 
-    abstract_html = ""
-    abstract_plain = ""
+    abs_raw = ""
     abs_m = re.search(r"\\begin\{abstract\}(.*?)\\end\{abstract\}", body, re.S)
     if abs_m:
         abs_raw = abs_m.group(1).strip()
-        abstract_html = render_blocks(abs_raw, ctx, inside_block=True)
-        abstract_plain = " ".join(re.sub(r"<[^>]+>", "", abstract_html).split())
         body = body[: abs_m.start()] + body[abs_m.end() :]
 
-    keywords_html = ""
+    kw_raw = ""
     kw_m = re.search(r"\\begin\{IEEEkeywords\}(.*?)\\end\{IEEEkeywords\}", body, re.S)
     if kw_m:
-        keywords_html = render_inline_latex(kw_m.group(1).strip(), ctx)
+        kw_raw = kw_m.group(1).strip()
         body = body[: kw_m.start()] + body[kw_m.end() :]
     else:
         kw_m2 = re.search(r"\\noindent\\textbf\{Keywords:\}\s*([^\n]+(?:\n[^\n\\]+)*)", body)
         if kw_m2:
-            keywords_html = render_inline_latex(kw_m2.group(1).strip(), ctx)
+            kw_raw = kw_m2.group(1).strip()
             body = body[: kw_m2.start()] + body[kw_m2.end() :]
 
-    scope_note_html = ""
+    sc_raw = ""
     sc_m = re.search(r"\\noindent\\textbf\{Implementation scope\.\}(.*?)(?=\\section\{)", body, re.S)
     if sc_m:
-        scope_note_html = render_inline_latex(sc_m.group(1).strip(), ctx)
+        sc_raw = sc_m.group(1).strip()
         body = body[: sc_m.start()] + body[sc_m.end() :]
 
-    title_html = render_inline_latex(title_raw, ctx)
     collect_labels_pass1(body, ctx)
+    title_html = render_inline_latex(title_raw, ctx)
+    abstract_html = render_blocks(abs_raw, ctx, inside_block=True) if abs_raw else ""
+    abstract_plain = html_to_plain_summary(abstract_html)
+    keywords_html = render_inline_latex(kw_raw, ctx) if kw_raw else ""
+    scope_note_html = render_inline_latex(sc_raw, ctx) if sc_raw else ""
     body_html = render_blocks(body, ctx)
     bib_html = render_bibliography_html(ctx)
 
@@ -2320,6 +2392,58 @@ def paper_reader_schema(paper: ParsedPaper) -> str:
     return f'<script type="application/ld+json">{payload}</script>'
 
 
+KATEX_HEAD_HTML = """\
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css" crossorigin="anonymous"
+      onerror="this.onerror=null;this.href='https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css';">"""
+
+KATEX_SCRIPTS_HTML = """\
+    <script>
+      (function () {
+        var katexOpts = {
+          delimiters: [
+            { left: "\\\\[", right: "\\\\]", display: true },
+            { left: "\\\\(", right: "\\\\)", display: false }
+          ],
+          throwOnError: false,
+          trust: function (ctx) {
+            return ctx.command === "\\\\href" && typeof ctx.url === "string" && ctx.url.indexOf("#") === 0;
+          }
+        };
+        function runMath() {
+          if (window.renderMathInElement) {
+            window.renderMathInElement(document.body, katexOpts);
+          }
+        }
+        function loadScript(src, fallback, next) {
+          var s = document.createElement("script");
+          s.src = src;
+          s.crossOrigin = "anonymous";
+          s.onload = next;
+          s.onerror = function () {
+            if (!fallback) return;
+            var fb = document.createElement("script");
+            fb.src = fallback;
+            fb.crossOrigin = "anonymous";
+            fb.onload = next;
+            document.head.appendChild(fb);
+          };
+          document.head.appendChild(s);
+        }
+        loadScript(
+          "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js",
+          "https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js",
+          function () {
+            loadScript(
+              "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js",
+              "https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js",
+              runMath
+            );
+          }
+        );
+      })();
+    </script>"""
+
+
 def render_papers_hub_html(papers: list[ParsedPaper]) -> str:
     """Render `https://rings.rs/papers/index.html`."""
 
@@ -2350,7 +2474,7 @@ def render_papers_hub_html(papers: list[ParsedPaper]) -> str:
             <span>&middot;</span>
             <span>{p.spec.pages} pages &middot; {p.pdf_size_kb} KB PDF</span>
           </div>
-          <p class="paper-abstract-preview">{html.escape(p.abstract_plain)}</p>
+          <div class="paper-abstract-preview">{p.abstract_html}</div>
           <ul class="paper-tags" aria-label="Topics">{tags_html}</ul>
           <div class="paper-card-actions">
             <a class="paper-btn paper-btn-primary" href="{reader_url}">Read Online (Web)</a>
@@ -2395,6 +2519,7 @@ def render_papers_hub_html(papers: list[ParsedPaper]) -> str:
     <meta name="twitter:description" content="{html.escape(description, quote=True)}">
     <meta name="twitter:image" content="https://rings.rs/assets/social/rings-card.png">
     {papers_index_schema(papers)}
+{KATEX_HEAD_HTML}
     <style>{PAPERS_CSS}</style>
   </head>
   <body data-paper-slug="hub">
@@ -2410,6 +2535,7 @@ def render_papers_hub_html(papers: list[ParsedPaper]) -> str:
       </section>
     </main>
 {site_footer_html()}
+{KATEX_SCRIPTS_HTML}
     <script src="/papers/papers-telemetry.js" defer></script>
   </body>
 </html>
@@ -2480,7 +2606,7 @@ def render_paper_reader_html(paper: ParsedPaper, companion: ParsedPaper) -> str:
     <meta name="twitter:description" content="{html.escape(desc, quote=True)}">
     <meta name="twitter:image" content="https://rings.rs/assets/social/rings-card.png">
     {paper_reader_schema(paper)}
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+{KATEX_HEAD_HTML}
     <style>{PAPERS_CSS}</style>
   </head>
   <body data-paper-slug="{html.escape(paper.spec.slug)}">
@@ -2547,9 +2673,7 @@ def render_paper_reader_html(paper: ParsedPaper, companion: ParsedPaper) -> str:
       </div>
     </main>
 {site_footer_html()}
-    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
-      onload="if(window.renderMathInElement)window.renderMathInElement(document.getElementById('paper-manuscript'), {{delimiters:[{{left:'\\\\[',right:'\\\\]',display:true}},{{left:'\\\\(',right:'\\\\)',display:false}}],throwOnError:false}});"></script>
+{KATEX_SCRIPTS_HTML}
     <script src="/papers/papers-telemetry.js" defer></script>
   </body>
 </html>

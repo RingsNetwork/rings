@@ -22,7 +22,7 @@
 \hypersetup{
   pdftitle={Rings: An Algebraic Structured Peer-to-Peer Network for Decentralized Identity and Resource Ownership},
   pdfauthor={Ryan J. Kung},
-  pdfkeywords={Structured peer-to-peer networks, Chord, WebRTC, non-transitive routing, CRDTs, crash consistency, Sphinx onion routing, AEZ v5, formal verification, Stateright}
+  pdfkeywords={Structured peer-to-peer networks, Chord, WebRTC, non-transitive routing, CRDTs, crash consistency, Sphinx onion routing, AEZ v5, TURN onion relay, formal verification, Stateright}
 }
 
 \newtheorem{definition}{Definition}
@@ -70,11 +70,11 @@
 \emergencystretch=1.5em
 
 \begin{abstract}
-Rings is an implemented algebraic structured peer-to-peer network for decentralized identity, resource ownership, transport, storage, privacy, and application protocols. Application servers, DNS authorities, and relay providers in conventional Internet deployments frequently become trusted bottlenecks for naming, routing, and user state. Rings instead models identities and resources as algebraic objects over a CorrectChord circular overlay $\mathbb{Z}/2^{160}\mathbb{Z}$, pairing browser WebAssembly and native runtimes over WebRTC/SCTP while keeping all cryptographic operations on carriers disjoint from the routing identifier ring. This paper unifies the core algebraic design with six production subsystems implemented in Rings~1.0: range-proved finger convergence, non-transitive WebRTC Chord routing and single-hop bridge delegation, conflict-free replicated data types (CRDTs) with HLC removal stability and Merkle data provenance, crash-durable local stores and age-gated replicated relay custody, cleanest-first slot accounting across shared node tables, and Sphinx/AEZ-v5 onion Kleisli pipelines bridging counterparty-signed service receipts to DRanking~2.0. We evaluate the Rust implementation empirically on real hardware and summarize exhaustive Stateright/BFS verification across $9,496,521$ reachable finite states ($9.50\times 10^6$) and 54 refuted safety mutants. Core object: $\mathsf{Rings}=(R,\mathcal{R}_N,\mathbf{Set}/R,\Omega_N,\mathsf{T}^{\mathcal{E}}_A,\Pi,\mathbb{G},\mathcal{X})$ with $R=\mathbb{Z}/2^{160}\mathbb{Z}$, $\Omega_N(X,H)=(X,\operatorname{owner}_N\circ H)$, and $\mathsf{CryptoCarrier}\cap R=\varnothing$.
+Rings is an implemented algebraic structured peer-to-peer network for decentralized identity, resource ownership, transport, storage, privacy, and application protocols. Application servers, DNS authorities, and relay providers in conventional Internet deployments frequently become trusted bottlenecks for naming, routing, and user state. Rings instead models identities and resources as algebraic objects over a CorrectChord circular overlay $\mathbb{Z}/2^{160}\mathbb{Z}$, pairing browser WebAssembly and native runtimes over WebRTC/SCTP while keeping all cryptographic operations on carriers disjoint from the routing identifier ring. This paper unifies the core algebraic design with six production subsystems implemented in Rings~1.0: range-proved finger convergence, non-transitive WebRTC Chord routing and single-hop bridge delegation, conflict-free replicated data types (CRDTs) with HLC removal stability and Merkle data provenance, crash-durable local stores and age-gated replicated relay custody, cleanest-first slot accounting across shared node tables, and Sphinx/AEZ-v5 onion Kleisli pipelines (with stateless cryptographic TURN and split-trust TURN--Onion UDP relays) bridging counterparty-signed service receipts to DRanking~2.0. We evaluate the Rust implementation empirically on real hardware and summarize exhaustive Stateright/BFS verification across $9,496,521$ reachable finite states ($9.50\times 10^6$) and 54 refuted safety mutants. Core object: $\mathsf{Rings}=(R,\mathcal{R}_N,\mathbf{Set}/R,\Omega_N,\mathsf{T}^{\mathcal{E}}_A,\Pi,\mathbb{G},\mathcal{X})$ with $R=\mathbb{Z}/2^{160}\mathbb{Z}$, $\Omega_N(X,H)=(X,\operatorname{owner}_N\circ H)$, and $\mathsf{CryptoCarrier}\cap R=\varnothing$.
 \end{abstract}
 
 \begin{IEEEkeywords}
-Structured peer-to-peer networks, Chord, WebRTC, non-transitive routing, CRDTs, crash consistency, Sphinx onion routing, AEZ v5, formal verification, Stateright.
+Structured peer-to-peer networks, Chord, WebRTC, non-transitive routing, CRDTs, crash consistency, Sphinx onion routing, AEZ v5, TURN onion relay, formal verification, Stateright.
 \end{IEEEkeywords}
 
 \section{Introduction}
@@ -152,7 +152,7 @@ age-gated replicated relay custody (Section~\ref{sec:durable}).  It proves
 fair slot accounting across five shared node tables, credit reclaim, and
 single-charge chunk reassembly under free identities (Section~\ref{sec:load}).
 It replaces legacy relay framing with client-sealed Sphinx/AEZ-v5 onion Kleisli
-pipelines (Section~\ref{sec:privacy}), bridges 1.0 service receipts into the
+pipelines and split-trust cryptographic TURN--Onion UDP relays (Section~\ref{sec:privacy}), bridges 1.0 service receipts into the
 companion DRanking 2.0 protocol~\cite{RingsDRanking2026} (Section~\ref{sec:trust}),
 and presents empirical micro- and macro-benchmarks together with exhaustive
 Stateright formal-verification metrics across all Rings 1.0 subsystems
@@ -166,7 +166,7 @@ Stateright formal-verification metrics across all Rings 1.0 subsystems
 \[
 \begin{array}{rcl}
 \mathsf{fault}&=&\mathsf{fail\mbox{-}stop}\ (\text{overlay}) \mid \mathsf{crash}\ (\text{local}),\\
-\mathsf{auth}(m,\sigma,k)&=&V(k,\sigma,m),\\
+\mathsf{auth}(m,\mathsf{sig},k)&=&V(k,\mathsf{sig},m),\\
 \mathsf{net}&=&\mathsf{async},\\
 \mathsf{clock}&=&|\operatorname{clock}_p-\operatorname{clock}_q|\le\sigma,\\
 \mathsf{io}&=&I_X:A_X^*\to\mathsf{IO},\\
@@ -175,7 +175,7 @@ Stateright formal-verification metrics across all Rings 1.0 subsystems
 \mathsf{crypto\_ops}&\cap&\mathsf{route\_ops}=\varnothing.
 \end{array}
 \]
-Clock tolerance $\sigma$ bounds skew across synchronized honest nodes.
+Clock tolerance $\sigma$ bounds physical skew across synchronized honest nodes (reserved throughout for clock skew, whereas cryptographic signatures write $\mathsf{sig}$).
 \end{assumption}
 
 \paragraph*{Unified Threat Model}
@@ -211,21 +211,21 @@ Note that $(a,a]_R=\varnothing$ since $\delta_a(a)=0$, so self-ownership is hand
   \operatorname{pred}_N(n)
     &=&\arg\min_{p\in N\setminus\{n\}}\delta_p(n)\\[2pt]
     &=&\arg\max_{p\in N\setminus\{n\}}\delta_n(p),\\[6pt]
-  \operatorname{Succ}^q_N(n)
+  \operatorname{Succ}^s_N(n)
     &=&
-    \operatorname{take}_q
+    \operatorname{take}_s
     \bigl(\operatorname{sort}_{\delta_n}(N\setminus\{n\})\bigr).
 \end{array}
 \]
-Each live node maps to a unique identifier in $N\subset R$ (hence $\operatorname{owner}_N(k)$ and $\operatorname{pred}_N(n)$ have unique minimizers); bootstrap singletons ($|N|=1$) resolve $\operatorname{owner}_N(k)=n$ trivially.
+Each live node maps to a unique identifier in $N\subset R$ (hence $\operatorname{owner}_N(k)$ and $\operatorname{pred}_N(n)$ have unique minimizers); bootstrap singletons ($|N|=1$) resolve $\operatorname{owner}_N(k)=n$ trivially, and $s\in\mathbb{N}_{>0}$ denotes successor-list capacity ($s=4$ default).
 \end{definition}
 
 \begin{assumption}[Correct-Chord stable base]
 \[
 \begin{array}{rcl}
-r&=&|\operatorname{Succ}^r_N(n)|,\\
-\mathsf{Steady}(N)&\Rightarrow&|N|\geq r+1,\\
-|N|<r+1&\Rightarrow&\mathsf{Init}(N),\\
+s&=&|\operatorname{Succ}^s_N(n)|,\\
+\mathsf{Steady}(N)&\Rightarrow&|N|\geq s+1,\\
+|N|<s+1&\Rightarrow&\mathsf{Init}(N),\\
 \mathsf{Maintain}&=&
   \{\mathsf{join},\mathsf{rectify}\}\\
 &&\cup\{\mathsf{stabilize}\}_{CorrectChord}.
@@ -255,14 +255,14 @@ topology maintenance.
 \[
   \mathcal{R}_N=
   (R,N,\operatorname{owner}_N,\operatorname{pred}_N,
-   \operatorname{Succ}^r_N,\operatorname{Rep}^{\rho}_N,F,E),
+   \operatorname{Succ}^s_N,\operatorname{Rep}^{\rho}_N,F,E),
 \]
 \[
 \begin{array}{rcl}
 F&\subseteq&N\times\mathbb{N}\times N,\\
 E&=&\prod_{v\in VID}E_v,\\
 \mathsf{SafetyRoot}(\mathcal{R}_N)&=&
-  (\operatorname{pred}_N,\operatorname{Succ}^r_N),\\
+  (\operatorname{pred}_N,\operatorname{Succ}^s_N),\\
 \mathsf{PerfWitness}(\mathcal{R}_N)&=&F.
 \end{array}
 \]
@@ -320,9 +320,10 @@ VID placement & $H_\nu:X_\nu\to R$ then owner map $\Omega_N$ \\
 Storage merge & factored CRDT semilattice $\mathsf{E}(x)\sqcup\mathsf{R}(x)$ \\
 Data provenance & Merkle batch \texttt{rings-core:\allowbreak data-entry:\allowbreak mutation} \\
 Lease descriptors & \texttt{rings-node:\allowbreak\{online-node,\allowbreak service,\allowbreak mail\}-descriptor},\\ & \code{rings-turn:service-descriptor} \\
+TURN auth \& tickets & \texttt{rings-turn-\allowbreak\{auth,\allowbreak credential,\allowbreak ticket\}-v1} \\
 Store authority & crash $\times$ meaning lattice $C\times M$ \\
 Load accounting & slot floor $f_T$ + fair pool $\mathcal{P}_T$ over $\mathcal{R}$ slots \\
-Onion pipeline & Kleisli category $\mathbf{Kl}(M)$ with Sphinx + AEZ v5 \\
+Onion pipeline & Kleisli category $\mathbf{Kl}(\mathcal{M})$ with Sphinx + AEZ v5 \\
 Service receipts & \code{rings-core:\allowbreak service-receipt:\allowbreak provisional} \\ & $\to$ DRanking \code{rings-service-receipt-v1} \\
 Effects & writer monad $\mathsf{T}^{\mathcal{E}}_A$ over action lists \\
 \bottomrule
@@ -332,7 +333,7 @@ Effects & writer monad $\mathsf{T}^{\mathcal{E}}_A$ over action lists \\
 
 \subsection{Architecture as Interfaces}
 
-Rings~1.0 factors its architecture into six composable interfaces (Figure~\ref{layers}), separating identity authentication, transport signaling, overlay ownership, and capability-confined execution.
+Rings~1.0 factors the core network object $\mathsf{Rings}=(R,\mathcal{R}_N,\mathbf{Set}/R,\Omega_N,\mathsf{T}^{\mathcal{E}}_A,\Pi,\mathbb{G},\mathcal{X})$ into six composable operational interfaces (Figure~\ref{layers}), separating identity authentication, transport signaling, overlay ownership, and capability-confined execution while instantiating its protocol laws across CRDT storage, $C\times M$ durability, \code{SlotRoster} admission, $\mathbf{Kl}(\mathcal{M})$ onion privacy, and \code{ServiceReceipt} trust in Sections~\ref{sec:chord}--\ref{sec:trust}.
 
 \begin{definition}[Layer tuple]
 \[
@@ -366,30 +367,30 @@ L & \mathsf{App}\circ P
 
 \begin{definition}[Identity proof]
 \[
-  \Pi=(K,\Sigma,V,D,\mathsf{enc},\mathsf{ttl})
+  \Pi=(K,\mathcal{S}_{\mathrm{sig}},V,D,\mathsf{enc},\mathsf{ttl})
 \]
 \[
 \begin{array}{rcl}
-V&:&K\times\Sigma\times B^*\to\{\top,\bot\},\\
+V&:&K\times\mathcal{S}_{\mathrm{sig}}\times B^*\to\{\top,\bot\},\\
 D&:&K\to R,\\
-\mathsf{enc}&:&\Sigma\to B^*,\\
-\mathsf{ttl}&:&\Sigma\to Time.
+\mathsf{enc}&:&\mathcal{S}_{\mathrm{sig}}\to B^*,\\
+\mathsf{ttl}&:&\mathcal{S}_{\mathrm{sig}}\to Time.
 \end{array}
 \]
 \end{definition}
 
 \begin{invariant}[Session authority]
 \[
-  d\in X_D,\qquad s\in K,\qquad D(k_d)=H_D(d).
+  d\in X_D,\qquad k_{\mathrm{sess}}\in K,\qquad D(k_d)=H_D(d).
 \]
 \[
 \begin{aligned}
-  \operatorname{Session}(d,s,e) &\Rightarrow V\bigl(k_d,\sigma_{d\to s},\\
-  &\quad\mathtt{rings\mbox{-}delegation\mbox{-}v1}\Vert d\Vert s\Vert e\bigr)\\
+  \operatorname{Session}(d,k_{\mathrm{sess}},e) &\Rightarrow V\bigl(k_d,\mathsf{sig}_{d\to k_{\mathrm{sess}}},\\
+  &\quad\mathtt{rings\mbox{-}delegation\mbox{-}v1}\Vert d\Vert k_{\mathrm{sess}}\Vert e\bigr)\\
   &\quad=\top\land now<e,
 \end{aligned}
 \]
-checked at each authenticated hop via $\mathsf{HopCheck}(d,s,e)\equiv\operatorname{Session}(d,s,e)$.
+checked at each authenticated hop via $\mathsf{HopCheck}(d,k_{\mathrm{sess}},e)\equiv\operatorname{Session}(d,k_{\mathrm{sess}},e)$.
 \end{invariant}
 
 \begin{definition}[Transport interface]
@@ -557,7 +558,7 @@ indexing DID, VID, Mailbox, Hidden Service, User/Relay, Queue/Quota, and World-E
 \mathsf{RecoverableReport}&\in&A.
 \end{array}
 \]
-Here $\mathcal{E}$ captures hard transition aborts (discarding emitted actions via $\pi_A(e)=\epsilon$), whereas recoverable failures emit $\mathsf{RecoverableReport}\in A$ along the normal $(X\times A^*)$ branch. For $(\sigma_S\times\sigma_O):S_\nu\times O_\nu\to S_\mu\times O_\mu$, $\mathsf{T}^{\sigma_{\mathcal{E}}}_{\sigma_A}(g)=\sigma_{\mathcal{E}}+(g\times\sigma_A^*)$.
+Here $\mathcal{E}$ captures hard transition aborts (discarding emitted actions via $\pi_A(e)=\epsilon$), whereas recoverable failures emit $\mathsf{RecoverableReport}\in A$ along the normal $(X\times A^*)$ branch. For $(\psi_S\times\psi_O):S_\nu\times O_\nu\to S_\mu\times O_\mu$, $\mathsf{T}^{\psi_{\mathcal{E}}}_{\psi_A}(g)=\psi_{\mathcal{E}}+(g\times\psi_A^*)$.
 \end{definition}
 
 \begin{definition}[Protocol object and morphism]
@@ -567,7 +568,7 @@ Here $\mathcal{E}$ captures hard transition aborts (discarding emitted actions v
   \tau_\nu &: S_\nu\times I_\nu \to \mathsf{T}^{\mathcal{E}_\nu}_{A_\nu}(S_\nu\times O_\nu).
 \end{aligned}
 \]
-A protocol morphism $\Sigma:\mathcal{P}_\nu\to\mathcal{P}_\mu=(\sigma_X,\sigma_S,\sigma_I,\sigma_O,\sigma_{\mathcal{E}},\sigma_A^*)$ satisfies $H_\mu\circ\sigma_X=H_\nu$ and $\mathsf{T}_{\sigma_A}^{\sigma_{\mathcal{E}}}(\sigma_S\times\sigma_O)\circ\tau_\nu=\tau_\mu\circ(\sigma_S\times\sigma_I)$.
+A protocol morphism $\Psi:\mathcal{P}_\nu\to\mathcal{P}_\mu=(\psi_X,\psi_S,\psi_I,\psi_O,\psi_{\mathcal{E}},\psi_A^*)$ satisfies $H_\mu\circ\psi_X=H_\nu$ and $\mathsf{T}_{\psi_A}^{\psi_{\mathcal{E}}}(\psi_S\times\psi_O)\circ\tau_\nu=\tau_\mu\circ(\psi_S\times\psi_I)$.
 \end{definition}
 
 \section{Chord Implementation --- PeerRing and Overlay Routing}\label{sec:chord}
@@ -617,7 +618,7 @@ non-transitive WebRTC routing.
   \operatorname{finger}_i(n) &= \operatorname{owner}_N(\operatorname{target}_i(n)),
 \end{aligned}
 \]
-where $p_n\in N\cup\{\bot\}$, $L_n\in N^{\leq r}$, $F_n:[0,L)\to N\cup\{\bot\}$ (with $F_n(i)\in\{\bot,\operatorname{finger}_i(n)\}$ upon convergence), and $E_n\subseteq E$.
+where $p_n\in N\cup\{\bot\}$, $L_n\in N^{\leq s}$, $F_n:[0,L)\to N\cup\{\bot\}$ (with $F_n(i)\in\{\bot,\operatorname{finger}_i(n)\}$ upon convergence), and $E_n\subseteq E$.
 \end{definition}
 
 \begin{algorithm}[htbp]
@@ -628,12 +629,12 @@ where $p_n\in N\cup\{\bot\}$, $L_n\in N^{\leq r}$, $F_n:[0,L)\to N\cup\{\bot\}$ 
 \State $pred[n]\gets none$;\ $a\gets \mathit{FindSuccessor}(n.did)$
 \State \Return $Remote(known, a)$
 \EndFunction
-\Function{InstallSuccessor}{$n, s$}
-\State $succ[n]\gets take(r, [s])$
-\State \Return $Remote(s, QuerySuccList(s))$
+\Function{InstallSuccessor}{$n, u$}
+\State $succ[n]\gets take(s, [u])$
+\State \Return $Remote(u, QuerySuccList(u))$
 \EndFunction
-\Function{InstallSuccList}{$n, s, list$}
-\State $succ[n]\gets take(r, s :: list)$
+\Function{InstallSuccList}{$n, u, list$}
+\State $succ[n]\gets take(s, u :: list)$
 \If{$head(succ[n]) \neq none$}
 \State $h\gets head(succ[n])$
 \State \Return $Multi(Notify(h, n.did),$ $\allowbreak SyncStorage(h))$
@@ -695,12 +696,12 @@ where $p_n\in N\cup\{\bot\}$, $L_n\in N^{\leq r}$, $F_n:[0,L)\to N\cup\{\bot\}$ 
 \label{alg:stabilize}
 \begin{algorithmic}[1]
 \Procedure{Stabilize}{$n, topo$}
-\State $actions\gets []$;\ $c\gets topo.pred$;\ $s\gets head(succ[n])$
-\If {$c \neq none$ and $c \in (n.did, s)$}
+\State $actions\gets []$;\ $c\gets topo.pred$;\ $h_0\gets head(succ[n])$
+\If {$c \neq none$ and $c \in (n.did, h_0)$}
 \State $succ[n]\gets insert(succ[n], c)$
 \State $actions\gets actions :: FindSuccessor(c)$
 \EndIf
-\State $succ[n]\gets take(r, merge(succ[n], topo.succ))$
+\State $succ[n]\gets take(s, merge(succ[n], topo.succ))$
 \If{$head(succ[n]) \neq none$}
 \State $h\gets head(succ[n])$
 \State $actions\gets actions :: Notify(h, n.did)$
@@ -716,7 +717,7 @@ where $p_n\in N\cup\{\bot\}$, $L_n\in N^{\leq r}$, $F_n:[0,L)\to N\cup\{\bot\}$ 
   \begin{aligned}
     \operatorname{Inv}_{ring}(N,S) \equiv \forall n\in N.\;&
     p_n=\operatorname{pred}_N(n)\\
-    &\land L_n=\operatorname{Succ}^r_N(n),
+    &\land L_n=\operatorname{Succ}^s_N(n),
   \end{aligned}\\[2pt]
   \mathsf{Steady}(N)\land\operatorname{Inv}_{ring}(N,S)
   \Rightarrow
@@ -846,7 +847,7 @@ where $\textsc{Fail}(p)$ handles expired or empty lookup attempts ($\mathsf{AwR}
 \end{law}
 
 \begin{definition}[Cyclic Slot Selection (\code{next\_fix\_slot})]\label{def:next-fix-slot}
-With $h=\operatorname{head}(n)$ and first routable slot $r=\lfloor\log_2\delta_n(h)\rfloor+1$ ($r=0$ if $h=\bot$), let $c\in\mathbb{N}$ be the cyclic cursor, $A=\{j\ge\max(c,r):\neg\mathsf{ver}_j\}$, and $B=\{j\in[r,\max(c,r)):\neg\mathsf{ver}_j\}$.  The selector is
+With $h=\operatorname{head}(n)$ and first routable slot $j_0=\lfloor\log_2\delta_n(h)\rfloor+1$ ($j_0=0$ if $h=\bot$), let $c\in\mathbb{N}$ be the cyclic cursor, $A=\{j\ge\max(c,j_0):\neg\mathsf{ver}_j\}$, and $B=\{j\in[j_0,\max(c,j_0)):\neg\mathsf{ver}_j\}$.  The selector is
 \[
   \operatorname{next\_fix\_slot}(c)=\operatorname{sel}(c)=
   \begin{cases}
@@ -858,7 +859,7 @@ With $h=\operatorname{head}(n)$ and first routable slot $r=\lfloor\log_2\delta_n
 \end{definition}
 
 \begin{proposition}[Starvation freedom]\label{prop:starve}
-Let $\mathcal{U}$ be the set of maximal contiguous populated equal-hint runs and individual unpopulated ($\bot$) or unretired slots among routable entries remaining unverified across attempts.  Between any two selections in $\mathcal{U}$, every other element of $\mathcal{U}$ is selected at least once, and periodic revalidation reopens proved ranges whenever $\alpha=\mathsf{Idle}\land(\neg\exists j\ge r:\neg\mathsf{ver}_j\ \lor\ k>0)$.
+Let $\mathcal{U}$ be the set of maximal contiguous populated equal-hint runs and individual unpopulated ($\bot$) or unretired slots among routable entries remaining unverified across attempts.  Between any two selections in $\mathcal{U}$, every other element of $\mathcal{U}$ is selected at least once, and periodic revalidation reopens proved ranges whenever $\alpha=\mathsf{Idle}\land(\neg\exists j\ge j_0:\neg\mathsf{ver}_j\ \lor\ k>0)$.
 \end{proposition}
 \begin{proof}
 Every completed or failed attempt at slot $j$ advances $c$ strictly past $j$
@@ -985,10 +986,10 @@ In a transitive ring, the true global predecessor $\operatorname{pred}_V(n)$ has
 
 \begin{law}[Passive 1-Hop Gap-Bridge Hints and Bridge-Delegated Delivery]\label{law:bridge-delivery}
 Whenever $n$ processes an authenticated \texttt{TopoInfo} report from
-$r\in\texttt{succ}_n$, the unconfirmed peers $U(n,r)=(\operatorname{set}(\texttt{reported.preds})\cup\operatorname{set}(\texttt{reported.succ}))\setminus\{p:\rho_n(p)\}$---where $\rho_n(p)\equiv (p\in\operatorname{Referenced}(S_n)\cup\{n\})$---update the zero-TTL partial map $\texttt{bridged}_n:\mathsf{Did}\rightharpoonup\mathsf{Did}$ ($|\texttt{bridged}_n|\le 2K^2$, with $p\mapsto r$ iff $r\in\operatorname{Referenced}(S_n)\land p\notin\operatorname{Referenced}(S_n)$).
-Payload delivery carries $\sigma\in\operatorname{RouteStage}=\operatorname{aim}(\mathsf{Did}_{\bot})\times\mathsf{bridged}(\mathbb{B})$ (fields $(\texttt{via},\texttt{handed\_off})$ with $\operatorname{aim}(\sigma,T)=\texttt{via}.\operatorname{unwrap\_or}(T)$; here $\texttt{via}=\operatorname{Some}(b)$ is fixed only at origination by a predecessor-less node via \code{reply\_via} for \code{FindSuccessorReport} replies and is delivered directly once $b$ is reached without mid-route mutation):
+$u\in\texttt{succ}_n$, the unconfirmed peers $U(n,u)=(\operatorname{set}(\texttt{reported.preds})\cup\operatorname{set}(\texttt{reported.succ}))\setminus\{p:\operatorname{ref}_n(p)\}$---where $\operatorname{ref}_n(p)\equiv (p\in\operatorname{Referenced}(S_n)\cup\{n\})$---update the zero-TTL partial map $\texttt{bridged}_n:\mathsf{Did}\rightharpoonup\mathsf{Did}$ ($|\texttt{bridged}_n|\le 2K^2$, with $p\mapsto u$ iff $u\in\operatorname{Referenced}(S_n)\land p\notin\operatorname{Referenced}(S_n)$).
+Payload delivery carries $\vartheta\in\operatorname{RouteStage}=\operatorname{aim}(\mathsf{Did}_{\bot})\times\mathsf{bridged}(\mathbb{B})$ (fields $(\texttt{via},\texttt{handed\_off})$ with $\operatorname{aim}(\vartheta,T)=\texttt{via}.\operatorname{unwrap\_or}(T)$; here $\texttt{via}=\operatorname{Some}(b)$ is fixed only at origination by a predecessor-less node via \code{reply\_via} for \code{FindSuccessorReport} replies and is delivered directly once $b$ is reached without mid-route mutation):
 \begin{itemize}[leftmargin=1.5em]
-\item \emph{Rule B1 (Bridged Delivery on Local Minimum in \code{delivery\_step}):} Node $n$ first delivers directly if $\operatorname{Linked}_n(T)$ (or to $a=\operatorname{aim}(\sigma,T)$ if $a\neq T\land\operatorname{Linked}_n(a)$), and otherwise runs greedy clockwise forwarding (\code{route\_toward}) over linked referenced peers $\operatorname{Referenced}(S_n)\cap\operatorname{Linked}(n)$ along $(n,a]_R$. Only when greedy hits a local minimum ($\operatorname{Handoff}(h)$) with $\neg\sigma.\texttt{handed\_off}$, if $\texttt{bridged}_n(a)=\operatorname{Some}(b)$ satisfies $b\neq n\land\operatorname{Linked}_n(b)\land\neg\operatorname{Linked}_n(a)$, $n$ delegates to $(b,\sigma)$ when $\delta_n(b)<\delta_n(a)$ and to $(b,(\sigma.\texttt{via},\top))$ otherwise; if no bridged hint applies, it falls back to $(h,(\sigma.\texttt{via},\top))$. When $\operatorname{Handoff}(h)$ occurs with $\sigma.\texttt{handed\_off}=\top$, \code{delivery\_step} returns $\bot$ (terminating the route acyclically).
+\item \emph{Rule B1 (Bridged Delivery on Local Minimum in \code{delivery\_step}):} Node $n$ first delivers directly if $\operatorname{Linked}_n(T)$ (or to $a=\operatorname{aim}(\vartheta,T)$ if $a\neq T\land\operatorname{Linked}_n(a)$), and otherwise runs greedy clockwise forwarding (\code{route\_toward}) over linked referenced peers $\operatorname{Referenced}(S_n)\cap\operatorname{Linked}(n)$ along $(n,a]_R$. Only when greedy hits a local minimum ($\operatorname{Handoff}(h)$) with $\neg\vartheta.\texttt{handed\_off}$, if $\texttt{bridged}_n(a)=\operatorname{Some}(b)$ satisfies $b\neq n\land\operatorname{Linked}_n(b)\land\neg\operatorname{Linked}_n(a)$, $n$ delegates to $(b,\vartheta)$ when $\delta_n(b)<\delta_n(a)$ and to $(b,(\vartheta.\texttt{via},\top))$ otherwise; if no bridged hint applies, it falls back to $(h,(\vartheta.\texttt{via},\top))$. When $\operatorname{Handoff}(h)$ occurs with $\vartheta.\texttt{handed\_off}=\top$, \code{delivery\_step} returns $\bot$ (terminating the route acyclically).
 \item \emph{Rule B2 (Gap-Bridge Lookup Delegation in \code{lookup\_successor}):} When DHT key resolution \code{find\_successor}($k$) would otherwise terminate with local head $h\notin\{k,n\}$ ($k\neq n$) across an unlinked gap, if $\exists(p\mapsto b)\in\texttt{bridged}_n$ with $b\in\operatorname{Referenced}(S_n)$, $p\notin\operatorname{Referenced}(S_n)$, $\operatorname{Linked}_n(b)$, and $\delta_n(k)\le\delta_n(p)<\delta_n(h)$, node $n$ delegates \code{FindSuccessorSend}($k$) via the bridge $b^*$ minimizing $\delta_n(p)$.
 \end{itemize}
 \end{law}
@@ -999,12 +1000,12 @@ over $\operatorname{RouteStage}=\operatorname{aim}(\mathsf{Did}_{\bot})\times\ma
 preserves all four route-safety invariants on any underlay graph $G=(V,L)$:
 (1)~\texttt{Linked} ($\{n_k,n_{k+1}\}\in L$),
 (2)~\texttt{NeverOvershoots} ($\delta_{n_k}(n_{k+1})<\delta_{n_k}(\operatorname{aim})$ on every non-crossing hop),
-(3)~\texttt{SingleCrossing} and \texttt{Acyclic} (the boolean crossing bit transitions $\bot\to\top$ at most once, visiting no state $(n_k,\sigma_k)$ twice and bounding every route to $\le 2|V|$ hops), and
-(4)~all-pairs cross-clique delivery in $\le 3$ hops ($2$ hops from a clique local minimum or bridge-adjacent peer, $3$ hops when greedy advances through a closer clique mate first) between two cliques $V_1,V_2$ sharing bridge $C$ whenever $(V_1\cup V_2)\setminus\{C\}\subseteq\texttt{succ}_C\cup\operatorname{Preds}_K(C)$ (supporting up to $s+m$ total non-bridge peers under minimal $m$-clique notifications, or up to $s+K=2K=8$, i.e.\ $C_{\mathrm{sub}}\le 4$, when $\operatorname{Preds}_K(C)$ holds $K$ entries; larger or multi-bridge cliques establish direct WebRTC links seamlessly via Rings' DHT-discovered stateless cryptographic UDP/TCP TURN and multi-hop \code{onion::udp} Onion TURN in \code{rings-turn-service}).
+(3)~\texttt{SingleCrossing} and \texttt{Acyclic} (the boolean crossing bit transitions $\bot\to\top$ at most once, visiting no state $(n_k,\vartheta_k)$ twice and bounding every route to $\le 2|V|$ hops even under concurrent asynchronous topology updates), and
+(4)~all-pairs cross-clique delivery in $\le 3$ hops ($2$ hops from a clique local minimum or bridge-adjacent peer, $3$ hops when greedy advances through a closer clique mate first) between two cliques $V_1,V_2$ sharing bridge $C$ whenever $(V_1\cup V_2)\setminus\{C\}\subseteq\texttt{succ}_C\cup\operatorname{Preds}_K(C)$ (supporting up to $s+m$ total non-bridge peers under minimal $m$-clique notifications, or up to $s+K=2K=8$, i.e.\ $C_{\mathrm{sub}}\le 4$, when $\operatorname{Preds}_K(C)$ holds $K$ entries; larger or multi-bridge cliques establish direct WebRTC links seamlessly via Rings' DHT-discovered cryptographic UDP/TCP TURN and multi-hop \code{onion::udp} TURN relay in \code{rings-turn-service}; Section~\ref{sec:turn-onion}).
 \end{theorem}
 \begin{proof}
-Because $0<\delta_{n_k}(n_{k+1})<\delta_{n_k}(a)\iff \delta_{n_{k+1}}(a)=\delta_{n_k}(a)-\delta_{n_k}(n_{k+1})<\delta_{n_k}(a)$ on $R=\mathbb{Z}/2^{160}\mathbb{Z}$, Invariant~(2) implies $\delta_{n_k}(\operatorname{aim}(\sigma,T))\in\mathbb{N}$ strictly decreases across every non-crossing greedy hop within each fixed stage $\sigma$, visiting at most $|V|-1$ nodes.
-At any local minimum `Handoff(h)`, $\operatorname{Referenced}(S_n)\cap\operatorname{Linked}(n)$ contains no node in $(n,a]_R$, so any linked bridge $b$ satisfies $\delta_n(b)>\delta_n(a)$ and both the wrapping branch of Rule~B1 and fallback handoff flip $\texttt{handed\_off}:\bot\to\top$ (while $\sigma.\texttt{via}$ never mutates mid-route, changing to $\bot$ only upon reaching $a=\operatorname{via}$ where $b$ delivers directly to $T$); since `Handoff` with $\texttt{handed\_off}=\top$ returns $\bot$, at most one ring-wrap or gap-bridge crossing occurs per route, yielding $\le 2|V|$ hops total.  In a
+Because $0<\delta_{n_k}(n_{k+1})<\delta_{n_k}(a)\iff \delta_{n_{k+1}}(a)=\delta_{n_k}(a)-\delta_{n_k}(n_{k+1})<\delta_{n_k}(a)$ on $R=\mathbb{Z}/2^{160}\mathbb{Z}$, Invariant~(2) implies that the lexicographic potential $\Phi(n,\vartheta)=(\mathbb{I}[\neg\vartheta.\texttt{handed\_off}],\,\delta_n(\operatorname{aim}(\vartheta,T)))\in\{0,1\}\times\{0,\dots,2^{160}-1\}$ strictly decreases on every non-crossing greedy hop regardless of concurrent neighbor-table mutations at other nodes, visiting at most $|V|-1$ distinct live nodes per fixed stage $\vartheta$.
+At any local minimum `Handoff(h)`, $\operatorname{Referenced}(S_n)\cap\operatorname{Linked}(n)$ contains no node in $(n,a]_R$, so any linked bridge $b$ satisfies $\delta_n(b)>\delta_n(a)$ and both the wrapping branch of Rule~B1 and fallback handoff flip $\texttt{handed\_off}:\bot\to\top$ (while $\vartheta.\texttt{via}$ never mutates mid-route, changing to $\bot$ only once upon reaching $a=\operatorname{via}$ where $b$ delivers directly to $T$); since `Handoff` with $\texttt{handed\_off}=\top$ returns $\bot$, at most one ring-wrap or gap-bridge crossing occurs per route, yielding $\le 2|V|$ hops total across any finite traversed peer set $V$.  In a
 two-clique graph $V_1\cup V_2$ sharing bridge $C$, whenever $C$'s \texttt{succ}$_C$ and $\operatorname{Preds}_K(C)$ cover $(V_1\cup V_2)\setminus\{C\}$ (up to $s+2=6$ combined non-bridge peers under minimal two-predecessor stabilization via Lemma~\ref{lem:articulation}, or up to $s+K=8$ peers when $\operatorname{Preds}_K(C)$ holds $K=4$ entries), every $u\in V_i\setminus\{C\}$ learns $\texttt{bridged}_u(v)=\operatorname{Some}(C)$ for $v\in V_j\setminus\{C\}$ from $C$'s \texttt{TopoInfo}. Within full-mesh clique $V_i$, greedy forwarding takes at most one intra-clique hop $u\to w$ to the local minimum relative to $v$ ($0$ hops if $u$ itself is the local minimum or $C$ is greedy-closest in $(u,v]_R$), whereupon Rule~B1 delegates $w\to C$ and $C$ delivers directly $C\to v$ in at most $3$ hops total.
 \end{proof}
 
@@ -1020,7 +1021,7 @@ two-clique graph $V_1\cup V_2$ sharing bridge $C$, whenever $C$'s \texttt{succ}$
   \mathcal{V} &= (X_V,H_V,\operatorname{Auth}_V),\\
   H_V &: X_V\to R,\\
   \operatorname{PrivateKey}(H_V(x)) &= \bot,\\
-  \operatorname{Auth}_V(op,x,\sigma,caps) &\in \{\top,\bot\}.
+  \operatorname{Auth}_V(op,x,\mathsf{sig},caps) &\in \{\top,\bot\}.
 \end{aligned}
 \]
 \end{definition}
@@ -1067,15 +1068,15 @@ $x\sqcup\bot=x$), and placement satisfies
 \]
 \end{definition}
 
-\begin{definition}[Mailbox and hidden service descriptor]
+\begin{definition}[Relay inbox and topic descriptor placement]
 \[
 \begin{aligned}
-  mbox(d,e) &= H_M(\mathtt{rings.mailbox}\Vert d\Vert e),\\
-  entry_M &= (\eta,exp,proof_s,dst,cipher),\\
-  h &= (\nu,\rho,Intro,Relay,Cap,K,exp,rank),\\
-  VID(h) &= H_H(h),\qquad \mathsf{Lookup}(h)=P^N_H(h).
+  \operatorname{inbox}(d) &= d+1 \in R\quad\bigl(\rho=1,\ \mathcal{M}_{r_{\mathrm{rep}}}(d+1)\bigr),\\
+  \operatorname{topic}(\nu) &= H_V(\nu)=\mathrm{SHA1}(\nu)\in R,\\
+  \mathsf{Lookup}(\nu) &= P^N_V(\nu)=\operatorname{owner}_N(H_V(\nu)).
 \end{aligned}
 \]
+Placing offline recipient $d$'s relay inbox (\code{EntryKind::RelayMessage}) at $d+1\in R$ guarantees that $d+1$ lies inside $d$'s immediate clockwise storage arc once $d$ joins, while data and service topics (\code{EntryKind::Data}, Law~\ref{law:lease-heartbeat}) replicate across $\operatorname{Rep}^\rho_N(\operatorname{topic}(\nu))$.
 \end{definition}
 
 \subsection{Carrier State, HLC Timestamps, and Cryptographic Data Provenance}
@@ -1083,17 +1084,17 @@ $x\sqcup\bot=x$), and placement satisfies
 \begin{definition}[Data Carrier and HLC Timestamps]\label{def:carrier}
 A Rings data-topic carrier (\code{dht::entry}) is a 4-tuple
 \[
-  x=(V,D,\rho,\beta),
+  x=(V,D,\varrho,\beta),
 \]
-where $V:\mathrm{Bytes}\times R\rightharpoonup\mathrm{Dot}$ maps live elements and their writer DIDs (\code{dots} plus multi-writer \code{co\_dots}) to addition dots, $D:\mathrm{Digest}\times R\rightharpoonup\mathrm{Dot}$ maps Keccak-256 element digests $h(v)$ and writer DIDs $o\in R$ to per-author removal dots (tombstones; unscoped $D:\mathrm{Digest}\rightharpoonup\mathrm{Dot}$ is used only on single-recipient \code{RelayMessage} carriers), $\rho:R\rightharpoonup\mathrm{Ver}$ maps each writer DID to its reset floor register (\code{register} plus \code{co\_registers}), and $\beta\in\mathbb{N}_\bot$ is the carrier liveness bound (joining by $\max$ with $\bot<t$).  Each version or dot $d$ carries a Hybrid Logical Clock (HLC) timestamp~\cite{Kulkarni2014}
+where $V:\mathrm{Bytes}\times R\rightharpoonup\mathrm{Dot}$ maps live elements and their writer DIDs (\code{dots} plus multi-writer \code{co\_dots}) to addition dots, $D:\mathrm{Digest}\times R\rightharpoonup\mathrm{Dot}$ maps Keccak-256 element digests $h(v)$ and writer DIDs $o\in R$ to per-author removal dots (tombstones; unscoped $D:\mathrm{Digest}\rightharpoonup\mathrm{Dot}$ is used only on single-recipient \code{RelayMessage} carriers), $\varrho:R\rightharpoonup\mathrm{Ver}$ maps each writer DID to its reset floor register (\code{register} plus \code{co\_registers}), and $\beta\in\mathbb{N}_\bot$ is the carrier liveness bound (joining by $\max$ with $\bot<t$).  Each version or dot $d$ carries a Hybrid Logical Clock (HLC) timestamp~\cite{Kulkarni2014}
 \[
   \tau_{\mathrm{HLC}}(d)=(w,c,o),
 \]
 ordered lexicographically by wall-clock time $w=\tau(d)$, logical counter
 $c\in\mathbb{N}$, and writer/origin DID $o\in R$.  On \code{EntryKind::Data}, a removal $((e,o),r)\in D$
-\emph{covers} an addition $((v,o'),d)\in V$ iff $o=o'\land h(v)=e\land d\le r$, and reset floor $\rho(o)$ covers only additions/removals authored by $o$ with $d\le\rho(o)$ (preserving strict non-interference across distinct writers $o\neq o'$).  A carrier $x$
-is \emph{normalized} iff no addition in $V$ is covered by $D$ or $\rho$, and
-no removal in $D$ is covered by $\rho$.  The delta-state join $x\sqcup y$~\cite{Almeida2018,Preguica2018} is pointwise $\max$
+\emph{covers} an addition $((v,o'),d)\in V$ iff $o=o'\land h(v)=e\land d\le r$, and reset floor $\varrho(o)$ covers only additions/removals authored by $o$ with $d\le\varrho(o)$ (preserving strict non-interference across distinct writers $o\neq o'$).  A carrier $x$
+is \emph{normalized} iff no addition in $V$ is covered by $D$ or $\varrho$, and
+no removal in $D$ is covered by $\varrho$.  The delta-state join $x\sqcup y$~\cite{Almeida2018,Preguica2018} is pointwise $\max$
 followed by normalization.
 \end{definition}
 
@@ -1105,7 +1106,7 @@ canonical domain separator $\mathtt{rings\mbox{-}core:data\mbox{-}entry:mutation
 and a Merkle batch claim $(\mathsf{did},\mathsf{kind},\mathsf{ver},\mathrm{leaf\_count},r_{\mathrm{merkle}})$:
 \[
 \begin{aligned}
-  \mathsf{Verify}\bigl(&k_o,\sigma_o,\mathtt{rings\mbox{-}core:data\mbox{-}entry:mutation}\\
+  \mathsf{Verify}\bigl(&k_o,\mathsf{sig}_o,\mathtt{rings\mbox{-}core:data\mbox{-}entry:mutation}\\
   &\Vert\mathsf{op}\Vert k_{\mathrm{topic}}\Vert r_{\mathrm{merkle}}\Vert(w,c,o)\bigr)=\top,
 \end{aligned}
 \]
@@ -1124,7 +1125,7 @@ $H=\mathtt{MAX\_TTL\_MS}=6\,000\,\mathrm{s}$ ($6\cdot 10^6\,\mathrm{ms}$) under
 tight clock-skew tolerance $\sigma=\mathtt{TS\_OFFSET\_TOLERANCE\_MS}=3\,\mathrm{s}$
 (whereas offline relay-inbox mail permits $\mathtt{DEFAULT\_RELAY\_INBOX\_TTL\_MS}=86\,400\,\mathrm{s}$
 up to $\mathtt{MAX\_RELAY\_INBOX\_TTL\_MS}=7\,\mathrm{d}$ bounded by signed hold instant).
-A removal $(e,r)$ (or floor $\rho$) is \emph{stable} at clock $t$ iff
+A removal $(e,r)$ (or floor $\varrho$) is \emph{stable} at clock $t$ iff
 \[
   t\ge\tau(r)+H+\sigma.
 \]
@@ -1134,8 +1135,8 @@ Because the horizon $H$ is uniform and $d\le r\implies\tau(d)\le\tau(r)$,
 $\operatorname{retire}_t$ never leaves a live addition covered by a retired
 removal and is a join-semilattice homomorphism satisfying
 $\operatorname{retire}_t\circ\operatorname{retire}_s=\operatorname{retire}_{\max(s,t)}$
-(distinct from the carrier-level expiry predicate $\mathrm{retired\_at}(x,t)$, which
-empties surviving additions once $t\ge\beta$ if $\beta\neq\bot$).
+(distinct from the carrier-level retention check $\mathrm{retired\_at}(x,t)$, which
+treats unstamped $\beta=\bot$ or elapsed $t\ge\beta$ as non-live and empties surviving additions while retaining unstable removals).
 \end{definition}
 
 \begin{lemma}[Stable removes cover only retired adds]\label{lem:stable-covers}
@@ -1158,7 +1159,7 @@ a remove side:
 \begin{aligned}
   x &= \mathsf{E}(x)\sqcup\mathsf{R}(x),\\
   \mathsf{E}(x) &= (V,\varnothing,\bot,\beta),\qquad
-  \mathsf{R}(x) = (\varnothing,D,\rho,0).
+  \mathsf{R}(x) = (\varnothing,D,\varrho,\bot).
 \end{aligned}
 \]
 $\mathsf{E}(x)$ is stored in the data store at authority $(\mathsf{Cch},\mathsf{Reb})$,
@@ -1194,7 +1195,7 @@ removes.  Any peer delta $\delta$ with $|D_\delta|>T_{\max}$ is inadmissible,
 and any operation or join whose retired result $y=\operatorname{retire}_t(x\sqcup\delta)$
 has $|D_y|>T_{\max}$ is refused with $\mathsf{Err}(\mathsf{Exhausted})$
 (\code{Storage Tombstone Full}), leaving the stored carrier unchanged.  Every
-admitted carrier encodes in at most $W=w_0+D_{\max}(P_{\max}+\lambda+w_D)+T_{\max}w_T+w_\rho=33\,731\,696\,\text{B}$ ($w_0=47$, $P_{\max}=32\,768$, $\lambda=3$, $w_D=69$, $w_T=101$, $w_\rho=65\,\text{B}$; $33.73\,\text{MB}\le \tfrac{3}{4}\mathtt{TRANSPORT\_MAX\_SIZE} =45\,\text{MB}\le 60\,\text{MB}$), and any admissible sync delta simulates a sequence of $\le 2|D_\delta|+|V_\delta|+1$ writer operations.
+admitted carrier encodes in at most $W=w_0+D_{\max}(P_{\max}+\lambda+w_D)+T_{\max}w_T+w_\varrho=33\,731\,696\,\text{B}$ ($w_0=47$, $P_{\max}=32\,768$, $\lambda=3$, $w_D=69$, $w_T=101$, $w_\varrho=65\,\text{B}$; $33.73\,\text{MB}\le \tfrac{3}{4}\mathtt{TRANSPORT\_MAX\_SIZE} =45\,\text{MB}\le 60\,\text{MB}$), and any admissible sync delta simulates a sequence of $\le 2|D_\delta|+|V_\delta|+1$ writer operations.
 \end{law}
 
 \subsection{Fetch Cache Linearization and Signed Lease Heartbeats}
@@ -1263,7 +1264,7 @@ DHT Data Store & $(\mathsf{Cch},\mathsf{Reb})$ & Disposable / rebuildable \\
 Fetch Cache / Measure & $(\mathsf{Vol},\mathsf{Reb})$ & Pure-read mirror \\
 Onion Entry Guards & $(\mathsf{Dur},\mathsf{Reb})$ & A, D (\code{DurableCache}) \\
 CRDT Removal Store & $(\mathsf{Dur},\mathsf{Ret})$ & A, D, N (\code{Retained}) \\
-Relay Custody Carriers & $(\mathsf{Dur},\mathsf{Ret})$ & A, D, N ($r$-repl.\ on $\mathsf{Dur}^\circ$) \\
+Relay Custody Carriers & $(\mathsf{Dur},\mathsf{Ret})$ & A, D, N ($r_{\mathrm{rep}}$-repl.\ on $\mathsf{Dur}^\circ$) \\
 Transaction Replay & $(\mathsf{Dur},\mathsf{Aut})$ & A, D, N, W, F (\code{Authoritative}) \\
 \bottomrule
 \end{tabular}
@@ -1276,7 +1277,7 @@ Transaction Replay & $(\mathsf{Dur},\mathsf{Aut})$ & A, D, N, W, F (\code{Author
 record $n=\mathrm{hex}(\mathrm{SHA1}(k))$ (used strictly as a fixed-width local filesystem key over canonical internal storage keys; SHA-256 is a drop-in substitute if untrusted external keys are exposed) has an empty witness marker $n.\mathtt{p}$
 created and directory-synced only after $n.\mathtt{tmp}\to n$ is flushed and directory-synced.
 On deletion, removing $n.\mathtt{p}$ is followed by a parent-directory sync barrier before unlinking $n$ and syncing the directory again, preserving $P\subseteq R$ across arbitrary OS crash points.
-At restore (\code{open}), unmarked data records $n\in R\setminus P$ are repaired in place by re-creating $n.\mathtt{p}$, whereas any $n\in P\setminus R$ is classified as $\mathsf{Missing}(n)$ and fails
+At restore (\code{open}), unmarked data records $n\in R\setminus P$ are repaired in place by re-creating $n.\mathtt{p}$ (safe even if a crash interrupted deletion between unlinking $n.\mathtt{p}$ and unlinking $n$, because \code{Authoritative}/\code{Retained} stores hold monotone replay/tombstone sets whose deletions are strictly post-horizon garbage-collection evictions), whereas any $n\in P\setminus R$ is classified as $\mathsf{Missing}(n)$ and fails
 stream $n$ closed (discharging W for every partial loss $\lambda_{\mathrm{part}}$,
 whereas total directory loss $\lambda_{\mathrm{tot}}$ leaves $P=R=\varnothing$ and serves as the documented operator reset).
 \item \emph{macOS / iOS:} File data and directory entries are flushed via
@@ -1294,7 +1295,7 @@ combined with $\mathtt{navigator.storage.persist()}$~\cite{MDNEviction}.  Becaus
 browsers delete origin storage whole ($P=\varnothing$) and ephemeral contexts can
 only claim durability ($\mathsf{Dur}^\circ$), node-local stores open at
 $(\mathsf{Dur}^\circ,m)$ with session end as $\lambda_{\mathrm{tot}}$, while
-custody of other nodes' mail requires $r\ge 2$ replicated holders.
+custody of other nodes' mail requires $r_{\mathrm{rep}}\ge 2$ replicated holders.
 \end{enumerate}
 \end{law}
 
@@ -1348,20 +1349,20 @@ before queueing; and the carrier tombstone/Ack is issued only after the
 application takes the message and commits $(\mathcal{W}_s,\mathcal{K}_s\setminus\{(q,h,x)\})$.
 By information-theoretic indistinguishability, no bounded-window receiver can
 safely admit un-custodied mail that has fallen behind live traffic ($q<\operatorname{rmin}(\mathcal{W}_s)$, where $\operatorname{rmin}(\mathcal{W}_s)$ is the lowest sequence tracked by $\mathcal{W}_s$).
-\item \emph{Age-gated replicated custody ($\mathcal{M}_r(k)$):} Because browser
+\item \emph{Age-gated replicated custody ($\mathcal{M}_{r_{\mathrm{rep}}}(k)$):} Because browser
 holders operate at claimed durability $\mathsf{Dur}^\circ$ and experience high
 churn~\cite{BlakeRodrigues}, a node advertises relay custody only after
 surviving an online age gate $A_{\min}$ ($\mathtt{DEFAULT\_RELAY\_AGE\_GATE\_MS}=2\,\mathrm{min}$
 floored at $\ge 4$ stabilization periods, and $A_{\min}=30\,\mathrm{min}$ in production
 relay profiles).  Each mail key $k$ is replicated
-across a chain $\mathcal{M}_r(k)$ of the first $r$ age-gated holders clockwise
-from $\operatorname{owner}_N(k)$ ($r=4$ to $\mathtt{DEFAULT\_RELAY\_INBOX\_REPLICAS}=8$).
+across a chain $\mathcal{M}_{r_{\mathrm{rep}}}(k)$ of the first $r_{\mathrm{rep}}$ age-gated holders clockwise
+from $\operatorname{owner}_N(k)$ ($r_{\mathrm{rep}}=4$ to $\mathtt{DEFAULT\_RELAY\_INBOX\_REPLICAS}=8$).
 \item \emph{Chain replication and digest repair:} Holders forward head-to-tail
-along $\mathcal{M}_r(k)$ (digest first, payload on miss) and acknowledge
-tail-to-head only after all $q(k)\le r$ members persist the element.  Adjacent
+along $\mathcal{M}_{r_{\mathrm{rep}}}(k)$ (digest first, payload on miss) and acknowledge
+tail-to-head only after all $q(k)\le r_{\mathrm{rep}}$ members persist the element.  Adjacent
 chain members probe liveness every $P_c=2.5\,\mathrm{s}$ (suspect after
 $\tau_c=7.5\,\mathrm{s}$) and repair via bundled carrier digest-set comparison on
-membership change or periodic pass, restoring $r$ copies within $D\le T_d+r\delta$
+membership change or periodic pass, restoring $r_{\mathrm{rep}}$ copies within $D\le T_d+r_{\mathrm{rep}}\delta$
 (where $T_d=P_c+\tau_c=10\,\mathrm{s}$ is worst-case silent failure detection and
 $\delta$ is per-hop repair transfer time).
 \end{enumerate}
@@ -1516,18 +1517,19 @@ interactive lanes.
 
 \subsection{Separate Cryptographic Carriers}
 
-\begin{definition}[End-to-end carrier, signed frame, and secret sharing]
-End-to-end encryption (ElGamal $(g^k, m\cdot h^k)$ on prime-order group $\mathbb{G}\neq R$) and Shamir threshold secret sharing over $\mathbb{F}_q[X]$~\cite{ssss} operate strictly off the routing carrier:
+\begin{definition}[End-to-end KEM-DEM carrier, signed frame, and secret sharing]
+End-to-end encryption (ElGamal key encapsulation $(g^k, m_{\mathrm{key}}\cdot h^k)$ on prime-order group $\mathbb{G}\neq R$ paired with \code{ChaCha20-Poly1305} DEM under \texttt{rings-core:\allowbreak secp256k1-elgamal-aead}) and Shamir threshold secret sharing over $\mathbb{F}_q[X]$~\cite{ssss} operate strictly off the routing carrier:
 \[
 \begin{aligned}
-  f &= (sid,seq,last,cipher,pk_s,\sigma_s),\\
-  \operatorname{FrameValid}(f) &\iff V(pk_s,\sigma_s,m_f)=\top\\
-  &\qquad\land\operatorname{Session}(D(pk_s),sid,e),\\
+  f &= (origin,dst,sid,seq,last,\\
+    &\qquad ts,ttl,cipher,pk_s,\mathsf{sig}_s),\\
+  \operatorname{FrameValid}(f) &\iff V(pk_s,\mathsf{sig}_s,m_f)=\top\\
+  &\qquad\land\operatorname{Session}(D(pk_s),k_{\mathrm{sess}},e),\\
   P\in\mathbb{F}_q[X],\quad sh_i &= (i,P(i))\in\mathbb{F}_q^2,\\
   \operatorname{reconstruct}(\{sh_i\}) &= P(0).
 \end{aligned}
 \]
-Here $m_f$ is the canonical serialization of $(sid,seq,last,cipher)$, and payloads exceeding link $d_0$ are sliced deterministically into $total=\lceil|data|/d_0\rceil$ indexed chunks carried inside authenticated frames before reassembly.
+Here $m_f$ is the canonical serialization of $(origin,dst,sid,seq,last,ts,ttl,cipher)$---binding recipient $dst\in R$ against surreptitious forwarding---and payloads exceeding link $d_0$ are sliced deterministically into $total=\lceil|data|/d_0\rceil$ indexed chunks carried inside authenticated frames before reassembly.
 \end{definition}
 
 \begin{invariant}[Chunk reassembly]
@@ -1545,7 +1547,7 @@ Here $m_f$ is the canonical serialization of $(sid,seq,last,cipher)$, and payloa
 Rings 1.0 replaces legacy relay framing with the \textbf{Sphinx Onion Kleisli
 Pipeline} (\code{rings-node::onion}), generalizing onion circuits from
 simple exit tunnels to client-sealed loops over a static operation signature
-$\Sigma$ composed in the Kleisli category $\mathbf{Kl}(M)$~\cite{Danezis2009,Piotrowska2017,Hoang2015,Moggi1991,Plotkin2003,Hughes2000,Lindley2011}.
+$\Sigma$ composed in the Kleisli category $\mathbf{Kl}(\mathcal{M})$~\cite{Danezis2009,Piotrowska2017,Hoang2015,Moggi1991,Plotkin2003,Hughes2000,Lindley2011}.
 
 \begin{definition}[Operation Signature $\Sigma$ and Partial $\Sigma$-Algebras]\label{def:onion-signature}
 The static shape signature is
@@ -1557,11 +1559,11 @@ containing $1+3+120=124$ rows, where $\Sigma_W=\{\mathsf{tcp},\mathsf{https},\ma
 \footnotesize
 \code{dht.find\_successor}, \code{dht.notify}, \code{dht.sync},
 \code{storage.lookup}, \code{storage.store}, \code{service.lookup},
-\code{service.register}, \code{direct.message}.
+\code{service.register}, \code{direct.message}, \code{turn.ticket}.
 \end{center}
 Each node $n$ publishes signed registrations $\mathrm{Reg}_n\subseteq\{\mathsf{relay}\}\cup\Sigma_W\cup(\Sigma_{\mathsf{invoke}}\times\Omega)$ (via \texttt{rings-node:onion-\{exit,invoke\}-descriptor}) carrying its 128-bit process epoch $e_n$ and quota $\operatorname{quota}(n,f,\omega)$, acting as a partial $\Sigma$-algebra with generic effect~\cite{Plotkin2003,Plotkin2009}
 \[
-  \llbracket f\rrbracket_n:\mathrm{Args}_f\times\mathrm{In}_f\to M\,\mathrm{Out}_f.
+  \llbracket f\rrbracket_n:\mathrm{Args}_f\times\mathrm{In}_f\to \mathcal{M}\,\mathrm{Out}_f.
 \]
 \end{definition}
 
@@ -1572,7 +1574,7 @@ $1\le n\le n_{\max}=4$, $\mathrm{Out}_{f_k}=\mathrm{In}_{f_{k+1}}$ for all
 $k<n$, intermediate symbols satisfy $\mathsf{Intermediate}\in\operatorname{pos}(f_k)$,
 and world-facing stream symbols ($\mathsf{tcp},\mathsf{https},\mathsf{udp}$) appear only at
 $n=1$.  Placed on nodes $h_1,\dots,h_n$, $P$ denotes the Kleisli composite in
-$\mathbf{Kl}(M)$:
+$\mathbf{Kl}(\mathcal{M})$:
 \[
   \llbracket P\rrbracket(v_0)=
   \bigl(\llbracket f_1\rrbracket_{h_1}(\bar{a}_1,-)\mathbin{\ggg}\cdots\mathbin{\ggg}
@@ -1588,7 +1590,7 @@ $(f\mathbin{\ggg}g)\mathbin{\ggg}h=f\mathbin{\ggg}(g\mathbin{\ggg}h)$.
 
 \begin{definition}[Client-Sealed Loop and Hall-Filter Draw Order (Law L7)]\label{def:onion-loop}
 For client $\diamond$, entry guard $g$, and $n\in[1,4]$ symbol hops $h_1,\dots,h_n$,
-each segment $k\in[0,n]$ inserts $s=2$ relays $r_{k,1},r_{k,2}$ (the minimal $s$
+each segment $k\in[0,n]$ inserts $s_{\mathrm{seg}}=2$ relays $r_{k,1},r_{k,2}$ (the minimal $s_{\mathrm{seg}}$
 such that no node is adjacent to both $\diamond$ and a symbol hop):
 \[
 \begin{aligned}
@@ -1596,7 +1598,7 @@ such that no node is adjacent to both $\diamond$ and a symbol hop):
   &\to\cdots\to h_n\to r_{n,1}\to r_{n,2}=g\to\diamond,
 \end{aligned}
 \]
-with total hops $H(n,s)=(s+1)n+s\le\hat{H}=14$ ($H\in\{5,8,11,14\}$) and $H-1$
+with total hops $H(n,s_{\mathrm{seg}})=(s_{\mathrm{seg}}+1)n+s_{\mathrm{seg}}\le\hat{H}=14$ ($H\in\{5,8,11,14\}$) and $H-1$
 distinct peer DIDs (\textbf{Law L7: Guard Closure}).  Route selection draws
 $h_1,\dots,h_n$ first, then guard $g$, then remaining relays $r_{k,j}$ using a
 bipartite-matching \textbf{Hall filter} $\mathcal{F}(\pi,p)$ (retaining candidates at position $p$ for partial placement $\pi$ only if extending $\pi$ admits a complete system of distinct mutually routable representatives across the remaining $\{1,\dots,H\}$ role slots) so that if the first draw succeeds,
@@ -1613,16 +1615,16 @@ peels an identical 205-byte layer
   \ell &= 1+64+20+16+8+16+64+16=205\,\mathrm{B},
 \end{aligned}
 \]
-from a fixed-length Sphinx header~\cite{Danezis2009} $\chi_i=\alpha_i\Vert\beta_i\Vert\gamma_i$ with blinded SEC1 group element $|\alpha_i|=33\,\mathrm{B}$, padded routing block $|\beta_i|=\hat{H}\ell=14\times 205=2870\,\mathrm{B}$, and MAC $|\gamma_i|=16\,\mathrm{B}$ ($|\chi_i|=2919\,\mathrm{B}$), where $x=\lceil t_{\mathrm{build}}/Q\rceil Q+X_0$ ($Q=30\,\mathrm{s}$, $X_0=120\,\mathrm{s}$, $V=150\,\mathrm{s}$) and $\kappa_i=(\sigma_{\mathrm{in}},\sigma_{\mathrm{out}})\in\{0,1\}^{256}\times\{0,1\}^{256}$ partitions the 64-byte carry field into a 32-byte inbound carry seed $\sigma_{\mathrm{in}}$ and a 32-byte outbound segment seed $\sigma_{\mathrm{out}}$ (filled with uniform dummy bytes at pure transit relays).
+from a fixed-length Sphinx header~\cite{Danezis2009} $\chi_i=\alpha_i\Vert\beta_i\Vert\gamma_i$ with blinded SEC1 group element $|\alpha_i|=33\,\mathrm{B}$, padded routing block $|\beta_i|=\hat{H}\ell=14\times 205=2870\,\mathrm{B}$, and MAC $|\gamma_i|=16\,\mathrm{B}$ ($|\chi_i|=2919\,\mathrm{B}$), where $x=\lceil t_{\mathrm{build}}/Q\rceil Q+X_0$ ($Q=30\,\mathrm{s}$, $X_0=120\,\mathrm{s}$, $V=150\,\mathrm{s}$) and $\kappa_i=(\zeta_{\mathrm{in}},\zeta_{\mathrm{out}})\in\{0,1\}^{256}\times\{0,1\}^{256}$ partitions the 64-byte carry field into a 32-byte inbound carry seed $\zeta_{\mathrm{in}}$ and a 32-byte outbound segment seed $\zeta_{\mathrm{out}}$ (filled with uniform dummy bytes at pure transit relays).
 Each loop selects a cell bucket class $b\in[16\,\mathrm{KiB},12\,\mathrm{MiB}]$ with uniform carry slot width $C_b=b-2919\,\mathrm{B}$ ($C_{16\,\mathrm{KiB}}=13\,465\,\mathrm{B}$, $82\%$ payload efficiency, \textbf{Law L3}) and deterministic release time $t^{\mathrm{dep}}_i=t^{\mathrm{arr}}_i+L(f_i)$ (\textbf{Law L4}).
 \end{definition}
 
 \begin{definition}[AEZ v5 Wide-Block Body Carry (\code{OnionBodyCipher})]\label{def:aez-carry}
-For each segment $k$, the client draws a 32-byte seed $\sigma_k$ (delivered as $\sigma_{\mathrm{out}}$ to symbol producer $p_k=h_k$ for intermediate segments $k\ge 1$) and derives
-48-byte AEZ v5 keys~\cite{Hoang2015,AEZv5} $k_{r_{k,j}}$ and $k_{c_k}$ via
+For each segment $k$, the client draws a 32-byte seed $\zeta_k$ (delivered as $\zeta_{\mathrm{out}}$ to symbol producer $p_k=h_k$ for intermediate segments $k\ge 1$) and derives
+48-byte AEZ v5 keys~\cite{Hoang2015,AEZv5} $k_{r_{k,j}}$ and $k_{c_k}$ (with empty AEZ tweak) via
 HKDF-SHA256.  Producer $p_k$ applies one authenticated wide-block encipherment
 $\mathrm{E}^{\tau}_{k_{c_k}}$ ($\tau=16$ zero-byte authenticator) over canonical serialization $\operatorname{enc}(v_k)$ followed by
-$s=2$ length-preserving wide-block encipherments $\mathrm{E}^0_{k_{r_{k,j}}}$ ($\tau=0$):
+$s_{\mathrm{seg}}=2$ length-preserving wide-block encipherments $\mathrm{E}^0_{k_{r_{k,j}}}$ ($\tau=0$):
 \[
 \begin{aligned}
   y_{k,0} &= \mathrm{E}^0_{k_{r_{k,1}}}\circ\mathrm{E}^0_{k_{r_{k,2}}}\circ\mathrm{E}^{16}_{k_{c_k}}\bigl(\operatorname{pad}(\operatorname{enc}(v_k))\bigr),\\
@@ -1638,51 +1640,99 @@ $s=2$ length-preserving wide-block encipherments $\mathrm{E}^0_{k_{r_{k,j}}}$ ($
 \leavevmode
 \begin{enumerate}[leftmargin=1.5em]
 \item \emph{SURB batching:} A Single-Use Reply Block for world-facing session
-$\varsigma$ is the $2\,979$-byte ($20+2\,919+32+8=2\,979\,\mathrm{B}$) client-sealed suffix $\upsilon=(\mathrm{next},\allowbreak\chi_\upsilon,\allowbreak\sigma_\upsilon,\allowbreak x_\upsilon)$~\cite{Chaum1981,Danezis2003}.
+$\varsigma$ is the $2\,979$-byte ($20+2\,919+32+8=2\,979\,\mathrm{B}$) client-sealed suffix $\upsilon=(\mathrm{next},\allowbreak\chi_\upsilon,\allowbreak\zeta_\upsilon,\allowbreak x_\upsilon)$~\cite{Chaum1981,Danezis2003}.
 After deducting the $16\,\mathrm{B}$ AEZ authenticator ($C_0=C_{16\,\mathrm{KiB}}-16=13\,449\,\mathrm{B}$) and $6\,\mathrm{B}$ credit-frame overhead, a $16\,\mathrm{KiB}$ credit loop leaves $13\,443\,\mathrm{B}$ for SURBs---batching $k=\lfloor 13\,443/2979\rfloor=4$ SURBs plus its own suffix ($k+1=5$ reply credits per forward loop, $Q_{\max}=256$)---whereas a $7\,\mathrm{B}$-framed stream data cell carries up to $C_0-7=13\,442\,\mathrm{B}$ of application payload.
 \item \emph{Dormant-by-default constant-rate cover loops:} Outbound onion lanes open in dormant mode (\code{open\_dormant}, emitting zero unsolicited cover cells on non-participating DHT links) and wake automatically when real onion cells arrive or depart. Across active bursts and their bounded dwell window $[t,t+D)$ ($D=Q=30\,\mathrm{s}$), links emit at constant rate
-$r=\rho B/V\approx 98.3\,\mathrm{units/s}$ ($\rho=0.9$, substituting cover cells when no real cell is
+$r_{\mathrm{cov}}=\eta_{\mathrm{cov}} B/V\approx 98.3\,\mathrm{units/s}$ ($\eta_{\mathrm{cov}}=0.9$, substituting cover cells when no real cell is
 queued), parking at zero idle overhead outside active dwell windows by default (\code{OnionIdleFloor::OFF}, with optional configurable background cover up to $r_{\mathrm{idle}}=1\,\mathrm{unit/s}$ via \code{OnionIdleFloor::DEFAULT}). This yields an analytical single-link paced emission ceiling of $98.3\times 13\,442\,\mathrm{B}\approx 1.32\,\mathrm{MB/s}$ at $b=16\,\mathrm{KiB}$ (sustaining $1.045\pm 0.003\,\mathrm{MB/s}$ end-to-end across a 5-node live WebRTC loopback, above the $1.00\,\mathrm{MB/s}$ CI throughput floor; Section~\ref{sec:verification}).
 \item \emph{\code{SlotRoster}-backed sliced-Bloom replay admission (Law L9):}
 Every received cell is charged $u(b)=b/16\,\mathrm{KiB}$ units against the sender
 DID's ledger $\Lambda_i(d)$ ($|\operatorname{dom}\Lambda_i|\le 2\mathcal{R}$,
 per-sender budget $B=16\,384$ units, global budget $G=64B$ over $V/Q=5$ quanta)
-\emph{before} SEC1 decoding and ECDH.  Valid tags $\nu_i$ are recorded in
-expiry-quantized sliced Bloom filters~\cite{Bloom1970,Almeida2007} $R_i[x]$,
-structured as a scalable chain of $76\,960\,\mathrm{B}$ blocks ($K=26$ slices of $M=23\,680$ bits, sealing $B=16\,384$ tags per block up to $64$ global blocks) queried via process-secret-keyed $\mathrm{Keccak\text{-}256}(\kappa\Vert\nu_i\Vert j)$ probes (per-block false-positive rate $\le 2^{-26}$,
+\emph{before} SEC1 decoding and ECDH.  Valid header tags $\nu_i$ are recorded in
+expiry-quantized sliced Bloom filters~\cite{Bloom1970,Almeida2007} $R_i[x]$ \emph{after} header MAC $\gamma_i$ verifies and \emph{before} AEZ body decipherment,
+structured as a scalable chain of $76\,960\,\mathrm{B}$ blocks ($K=26$ slices of $m_{\mathrm{slice}}=23\,680$ bits, sealing $B=16\,384$ tags per block up to $64$ global blocks) queried via process-secret-keyed $\mathrm{Keccak\text{-}256}(\kappa\Vert\nu_i\Vert j)$ probes (per-block false-positive rate $\le 2^{-26}$,
 union FP $\le 2^{-20}$, max memory $\approx 4.70\,\mathrm{MiB}$ at 64 blocks), ensuring every AEZ
-key is used at most once across restarts and clock rollbacks.
+key is invoked at most once across restarts and clock rollbacks.
 \end{enumerate}
 \end{law}
 
 \begin{theorem}[Onion Pipeline Security Laws (Laws L5, L5$'$, L6, L8)]\label{theo:onion-security}
-Under the Gap-DDH assumption over secp256k1 in the Random Oracle Model (modeling HKDF as a random oracle against active header-peeling queries~\cite{Danezis2009}), together with ChaCha20 PRG, HMAC-SHA256 EUF-CMA, and AEZ~v5 strong PRP / robust AEAD assumptions~\cite{Hoang2015,Degabriele2018}, let $\pi_i(P)$ denote hop $i$'s local interface projection (role, adjacent links, symbol $f_i$, arguments $\bar{a}_i$, expiry $x$, and cell class $b$), $\pi^\circ_i$ its position-erased projection (identical to $\pi_i(P)$ with hop index $i$ omitted), $\sigma(P)$ the visible loop class, and $D_i$ the cumulative deterministic delay from client build time $t_{\mathrm{build}}$ to arrival $t^{\mathrm{arr}}_i=t_{\mathrm{build}}+D_i$ modulo $Q$. Every loop built by Definitions~\ref{def:onion-loop}--\ref{def:aez-carry} satisfies:
+Under the Gap-DDH assumption over secp256k1 in the Random Oracle Model (modeling HKDF as a random oracle against active header-peeling queries~\cite{Danezis2009}), together with ChaCha20 PRG, HMAC-SHA256 EUF-CMA, and AEZ~v5 strong PRP / robust AEAD assumptions~\cite{Hoang2015,Degabriele2018}, let $\pi_i(P)$ denote hop $i$'s local interface projection (role, adjacent links, symbol $f_i$, arguments $\bar{a}_i$, expiry $x$, and cell class $b$), $\pi^\circ_i$ its position-erased projection (identical to $\pi_i(P)$ with hop index $i$ omitted), $\operatorname{cls}(P)$ the visible loop class, and $D_i$ the cumulative deterministic delay from client build time $t_{\mathrm{build}}$ to arrival $t^{\mathrm{arr}}_i=t_{\mathrm{build}}+D_i$ modulo $Q$. Every loop built by Definitions~\ref{def:onion-loop}--\ref{def:aez-carry} satisfies:
 \begin{enumerate}[leftmargin=1.5em]
-\item \textbf{Law L5 (Noninterference):} $\pi_i(P)=\pi_i(P')\land\sigma(P)=\sigma(P')\implies\operatorname{view}_i(P)\approx_c\operatorname{view}_i(P')$: no hop learns another hop's arguments $\bar{a}_j$, invoke backend name $\omega_j$, or segment value $v_k\neq\hat{v}_i$~\cite{Goguen1982}.
-\item \textbf{Law L5$'$ (Position Hiding):} For loops $P,P'$ of arbitrary lengths $H,H'\le\hat{H}=14$, a hop's distinguishing advantage between positions $i$ and $i'$ with matching local projection $\pi^\circ_i$ under uniform build-phase quantization modulo $Q$ is bounded by
+\item \textbf{Law L5 (Noninterference):} $\pi_i(P)=\pi_i(P')\land\operatorname{cls}(P)=\operatorname{cls}(P')\implies\operatorname{view}_i(P)\approx_c\operatorname{view}_i(P')$: no hop learns another hop's arguments $\bar{a}_j$, invoke backend name $\omega_j$, or segment value $v_k\neq\hat{v}_i$~\cite{Goguen1982}.
+\item \textbf{Law L5$'$ (Position Hiding):} For loops $P,P'$ of arbitrary lengths $H,H'\le\hat{H}=14$, a non-triggering hop's distinguishing advantage between positions $i$ and $i'$ with matching local projection $\pi^\circ_i$ under unscheduled organic build phase $t_{\mathrm{build}}\bmod Q\sim\mathrm{Unif}[0,Q)$ (whereas chosen-send-time adversaries knowing $t_{\mathrm{build}}$ require client pre-dispatch jitter or cover-slot alignment) is bounded by
 \[
 \begin{aligned}
-  \mathrm{Adv}_i\;\le{}&\hat{H}\bigl(\epsilon_{\mathrm{Gap\text{-}DDH}}+\epsilon_{\mathrm{PRG}}+\epsilon_{\mathrm{MAC}}\bigr)\\
+  \mathrm{Adv}_i\;\le{}&2\hat{H}\bigl(\epsilon_{\mathrm{Gap\text{-}DDH}}+\epsilon_{\mathrm{PRG}}+\epsilon_{\mathrm{MAC}}\bigr)\\
   &+\min\bigl(1,\,|D_i-D'_{i'}|/Q\bigr).
 \end{aligned}
 \]
 \item \textbf{Law L6 (Client Path Authority):} $\mathrm{next}_i$ is sealed in $\lambda_i$ by $\diamond$ independently of runtime values $v_k$, admitting the Arrow composition fragment ($\mathbin{\ggg}$) while excluding promiscuous monadic bind ($\gg\!\!=$)~\cite{Lindley2011}.
-\item \textbf{Law L8 (Byte Unlinkability and Tagging Resistance):} Consecutive edges carry independent uniform ciphertexts against external link observers and pure transit relays ($\chi_i\neq\chi_{i+1}$, $y_{i-1}\neq y_i$; on intermediate segments $k\ge 1$, a corrupted symbol producer $p_k=h_k$ holds segment seed $\sigma_{\mathrm{out}}$ and can correlate ciphertexts on segment $k$ only if colluding with a downstream link observer), class relabeling fails $\gamma_i=\mathrm{MAC}_{K_i}(b\Vert\beta_i)$, and any modification $\tilde{y}\neq y_{k,j}$ is rejected by consumer $\mathrm{D}^{16}_{k_{c_k}}$ with probability $\ge 1-q\cdot 2^{-128}-\epsilon_{\mathrm{AEZ}}$ across $q$ active forgery queries ($\ge 1-2^{-128}-\epsilon_{\mathrm{AEZ}}$ per single attempt)~\cite{Degabriele2018}.
+\item \textbf{Law L8 (Byte Unlinkability and Tagging Resistance):} Consecutive edges carry independent uniform ciphertexts against external link observers and pure transit relays ($\chi_i\neq\chi_{i+1}$, $y_{i-1}\neq y_i$; on intermediate segments $k\ge 1$, a corrupted symbol producer $p_k=h_k$ holds segment seed $\zeta_{\mathrm{out}}$ and can correlate ciphertexts on segment $k$ only if colluding with a downstream link observer), class relabeling fails $\gamma_i=\mathrm{MAC}_{K_i}(b\Vert\beta_i)$, and because $R_i[x]$ commits $(x,\nu_i)$ before body decryption (limiting each single-use consumer key $k_{c_k}$ to $q\le 1$ online decryption), any modification $\tilde{y}\neq y_{k,j}$ is rejected by $\mathrm{D}^{16}_{k_{c_k}}$ with probability $\ge 1-2^{-128}-\epsilon_{\mathrm{AEZ}}$~\cite{Degabriele2018}.
 \end{enumerate}
 \end{theorem}
 \begin{proof}[Proof Sketch]
 We outline the hybrid sequence across an $H$-hop loop ($H\le\hat{H}=14$), adapting the Sphinx and AEZ reductions of Danezis--Goldberg~\cite{Danezis2009}, Hoang et al.~\cite{Hoang2015}, and Degabriele--Stam~\cite{Degabriele2018}:
-\emph{Game~$G_0\to G_1$ (Gap-DDH Blinding \& Random-Oracle Key Schedule):} Under Gap-DDH over secp256k1 and random-oracle HKDF, even an active adversary submitting chosen group elements $\alpha$ to honest header-peeling relays cannot distinguish an uncorrupted hop $j$'s ephemeral shared secret and derived keys $(k^{\mathrm{enc}}_j,k^{\mathrm{mac}}_j,k^{\mathrm{blind}}_j)$ from uniform independent keys except with advantage $\hat{H}\epsilon_{\mathrm{Gap\text{-}DDH}}$, ensuring fresh unlinkable $\alpha_j\neq\alpha_{j+1}$ across re-blinded segments.
-\emph{Game~$G_1\to G_2$ (PRG Pad \& Fixed-Width Position Hiding):} Replacing ChaCha20 keystream expansions over $|\beta|=\hat{H}\ell=2\,870\,\mathrm{B}$ at each uncorrupted hop incurs advantage at most $\hat{H}\epsilon_{\mathrm{PRG}}$ over $\hat{H}$ peeling steps. Because all three \code{HopRole} variants pack identical $205$-byte slots shifted and padded to constant width $2\,870\,\mathrm{B}$, the decrypted header tail after hop $i$ is uniform noise for both $H$ and $H'$, isolating only the local arrival-to-expiry offset $(x-t^{\mathrm{arr}}_i)$ under uniform build phase $t_{\mathrm{build}}\bmod Q$ (absent external inter-hop timing observation of deterministic releases $L(f_i)$): with $t^{\mathrm{arr}}_i=t_{\mathrm{build}}+D_i$, this offset at positions $(i,D_i)$ and $(i',D'_{i'})$ has statistical distance at most $\min(1,|D_i-D'_{i'}|/Q)$, establishing Law~L5$'$.
+\emph{Game~$G_0\to G_1$ (Gap-DDH Blinding \& Random-Oracle Key Schedule):} Under Gap-DDH over secp256k1 and random-oracle HKDF, even an active adversary submitting chosen group elements $\alpha$ to honest header-peeling relays cannot distinguish an uncorrupted hop $j$'s ephemeral shared secret and derived keys $(k^{\mathrm{enc}}_j,k^{\mathrm{mac}}_j,k^{\mathrm{blind}}_j)$ from uniform independent keys except with advantage $\hat{H}\epsilon_{\mathrm{Gap\text{-}DDH}}$ per real-to-ideal transition, ensuring fresh unlinkable $\alpha_j\neq\alpha_{j+1}$ across re-blinded segments.
+\emph{Game~$G_1\to G_2$ (PRG Pad \& Fixed-Width Position Hiding):} Replacing ChaCha20 keystream expansions over $|\beta|=\hat{H}\ell=2\,870\,\mathrm{B}$ at each uncorrupted hop incurs advantage at most $\hat{H}\epsilon_{\mathrm{PRG}}$ per transition. Because all three \code{HopRole} variants pack identical $205$-byte slots shifted and padded to constant width $2\,870\,\mathrm{B}$, transitioning $P\to\mathsf{Ideal}\to P'$ contributes $2\hat{H}(\epsilon_{\mathrm{Gap\text{-}DDH}}+\epsilon_{\mathrm{PRG}}+\epsilon_{\mathrm{MAC}})$ and leaves the decrypted header tail uniform noise, isolating only the local arrival-to-expiry offset $(x-t^{\mathrm{arr}}_i)$ under $t_{\mathrm{build}}\bmod Q\sim\mathrm{Unif}[0,Q)$ (absent external inter-hop timing observation of deterministic releases $L(f_i)$): with $t^{\mathrm{arr}}_i=t_{\mathrm{build}}+D_i$, this offset at positions $(i,D_i)$ and $(i',D'_{i'})$ has total variation distance $\min(1,|D_i-D'_{i'}|/Q)$, establishing Law~L5$'$.
 \emph{Game~$G_2\to G_3$ (Header MAC \& Path Authority):} Under EUF-CMA security of HMAC-SHA256 ($\hat{H}\epsilon_{\mathrm{MAC}}$), no adversary without $k^{\mathrm{mac}}_j$ can forge $\gamma_j=\mathrm{MAC}_{k^{\mathrm{mac}}_j}(b\Vert\beta_j)$ or substitute another hop class $b$ or routing descriptor $\lambda_j$; thus $\mathrm{next}_j$ and $\bar{a}_j$ remain fixed by client $\diamond$ independently of intermediate payload values $v_k$ (Law~L6), while hops $j\neq i$ see only uniform XORed/encrypted slots for $\pi_i(P)=\pi_i(P')$ (Law~L5).
-\emph{Game~$G_3\to G_4$ (Wide-Block Body Carry):} For any segment $k$, the producer wraps fixed-width padded plaintext $\operatorname{pad}(\operatorname{enc}(v_k))$ through $\mathrm{E}^{16}_{k_{c_k}}$ and $s=2$ passes of $\mathrm{E}^0_{k_{r_{k,j}}}$, with keys derived from fresh nonce-protected seed $\sigma_k$ and replay protection enforced once via $R_i[x]$ (Law~\ref{law:surb-replay}). By AEZ v5 strong PRP security ($\tau=0$) at relays and robust AEAD security ($\tau=16$) at the consumer~\cite{Hoang2015,Degabriele2018}, intermediate ciphertexts $y_{k,j}$ are pseudorandom permutations over $\{0,1\}^{8C_b}$ (yielding segment-$k$ byte unlinkability $y_{i-1}\neq y_i$ against external observers and transit relays that lack $\sigma_k$), and any bit-flip, truncation, or tagging $\tilde{y}\neq y_{k,j}$ anywhere on the segment causes consumer $\mathrm{D}^{16}_{k_{c_k}}$ to fail its $0^{128}$ authenticator check with advantage at most $q\cdot 2^{-128}+\epsilon_{\mathrm{AEZ}}$ across $q$ forgery queries (Law~L8).
+\emph{Game~$G_3\to G_4$ (Wide-Block Body Carry):} For any segment $k$, the producer wraps fixed-width padded plaintext $\operatorname{pad}(\operatorname{enc}(v_k))$ through $\mathrm{E}^{16}_{k_{c_k}}$ and $s_{\mathrm{seg}}=2$ passes of $\mathrm{E}^0_{k_{r_{k,j}}}$, with keys derived from fresh seed $\zeta_k$. Because `hop` commits $(x,\nu_i)$ to $R_i[x]$ immediately after header verification and before `step` deciphers the carry slot (and `OnionClientTags` removes return tag $t_\diamond$ upon single receipt), replayed headers with mauled bodies are dropped before $\mathrm{D}^{16}_{k_{c_k}}$ executes ($q\le 1$, Law~\ref{law:surb-replay}). By AEZ v5 strong PRP security ($\tau=0$) at relays and single-query robust AEAD security ($\tau=16$) at the consumer~\cite{Hoang2015,Degabriele2018}, intermediate ciphertexts $y_{k,j}$ are pseudorandom permutations over $\{0,1\}^{8C_b}$ (yielding segment-$k$ byte unlinkability $y_{i-1}\neq y_i$ against external observers and transit relays lacking $\zeta_k$), and any modification $\tilde{y}\neq y_{k,j}$ fails the $0^{128}$ authenticator check except with probability $\le 2^{-128}+\epsilon_{\mathrm{AEZ}}$ (Law~L8).
 \end{proof}
+
+\subsection{Zero-Database Cryptographic TURN and Multi-Hop TURN--Onion UDP Relay}\label{sec:turn-onion}
+
+When both peers reside behind Symmetric NATs, carrier-grade NATs, or UDP-blocking firewalls beyond passive 1-hop clique bridging ($C_{\mathrm{sub}}>K$, Theorem~\ref{theo:bridge-safety}), standard WebRTC deployments fall back to centralized RFC~5766 TURN servers~\cite{RFC5389,RFC5766} that maintain shared-secret credential databases and simultaneously observe a client's overlay identity, source IP $\mathrm{IP}_\diamond$, and remote peer IP $\mathrm{IP}_{\mathrm{peer}}$. Rings composes \code{rings-turn}, \code{rings-transport::\allowbreak TurnTcpBridge}, \code{rings-turn-service}, and \code{rings-node::\allowbreak onion::\allowbreak udp} as an external overlay service without introducing STUN, ICE, or TURN primitives into \code{rings-core} or \code{rings-node}.
+
+\begin{definition}[Zero-Database ECDH TURN Credentials and Single-Use \code{turn.ticket} Reservations]\label{def:turn-ticket}
+A TURN host with static secp256k1 keypair $(\mathrm{sk}_S,\mathrm{pk}_S)$ publishes signed \code{TurnServiceDescriptor} leases to DHT topic \code{turn\_services} under \code{rings-turn:service-descriptor} ($I=30\,\mathrm{s}$, $T=90\,\mathrm{s}$; Law~\ref{law:lease-heartbeat}), advertising \code{turn://} or \code{turns://...?pubkey=}$\operatorname{b58}(\mathrm{pk}_S)$ over dual UDP+TCP listeners (paired on UDP-blocked networks with framed client \code{TurnTcpBridge}). Because WebRTC ICE mandates RFC~5389 long-term credentials ($K_{\mathrm{TURN}}=\mathrm{MD5}(\mathrm{username}\Vert\mathtt{:}\Vert\mathrm{realm}\Vert\mathtt{:}\Vert\mathrm{cred})$ with \code{HMAC-SHA1} \code{MESSAGE-INTEGRITY} and bounded server \code{NONCE} table $N_{\max}=4096$) and transmits \code{USERNAME} ($\le 512\,\mathrm{B}$) in cleartext, long-term identity modes (\code{Did}, \code{DelegateeKey}, or multi-curve \code{Account} signing an \code{AccountSessionClaim} over a fresh secp256k1 session key $\mathrm{pk}_{\mathrm{sess}}$) place a public signature $\mathsf{sig}$ bound to $\mathrm{pk}_S$ under \code{rings-turn-auth-v1} in \code{USERNAME} and derive $\mathrm{cred}$ statelessly from the secp256k1 affine $x$-coordinate $\mathrm{ECDH}(\mathrm{sk}_{\mathrm{sess}},\mathrm{pk}_S)$:
+\[
+\begin{aligned}
+  \mathrm{cred} &= \operatorname{b58}\Bigl(\mathrm{Keccak\text{-}256}\bigl(\mathtt{rings\mbox{-}turn\mbox{-}credential\mbox{-}v1\backslash n}\\
+  &\qquad\qquad\Vert\,\mathrm{ECDH}(\mathrm{sk}_{\mathrm{sess}},\mathrm{pk}_S)\Vert\mathsf{sig}\bigr)\Bigr),
+\end{aligned}
+\]
+requiring zero user databases or shared secrets while preventing passive UDP observers from recovering $\mathrm{cred}$ (if static $\mathrm{sk}_S$ is later compromised, historical TURN $\mathrm{cred}$ values become computable from captured \code{USERNAME}s, whereas WebRTC media/data forward secrecy remains protected end-to-end by peer-to-peer DTLS).
+
+To hide $\mathrm{Did}_\diamond$ from the TURN operator itself, client $\diamond$ generates a single-use secp256k1 keypair $(\mathrm{sk}_e,\mathrm{pk}_e)$ and invokes \code{turn.ticket} at fixed Kleisli shape $\mathsf{invoke}\langle 64,1024,500\,\mathrm{ms}\rangle$ over a 5-hop guard-closed loop ($H=5$, Definition~\ref{def:onion-loop}). Pairing stateless credential derivation with a bounded in-memory reservation table ($R_{\max}=256$, $\mathrm{TTL}_{\mathrm{tkt}}=60\,\mathrm{s}$, default $16$ concurrent and $120\,\mathrm{min}^{-1}$, binding zero OS sockets prior to \code{Allocate}), the TURN host returns $\tau_{\mathrm{tkt}}=(\mathrm{sid}_{16},\mathrm{pk}_e,t_{\exp},\mathsf{sig}_S)$ signed under \code{rings-turn-ticket-v1}. On \code{Allocate}, $\diamond$ presents $\mathtt{tkt\mbox{-}}\operatorname{b58}(\tau_{\mathrm{tkt}})\mathtt{.}\operatorname{b58}(\mathsf{sig}_e)$ signed by $\mathrm{sk}_e$, consuming $\mathrm{sid}_{16}$ at most once and exposing zero \code{Did} or \code{Delegation} bytes on the wire (provided $\diamond$'s onion guard $g$ does not collude with the TURN host).
+\end{definition}
+
+\begin{law}[Exit-Blinded TURN--Onion UDP Bridge (\code{Turn\allowbreak Allocation\allowbreak Core} $\leftrightarrow$ \code{Onion\allowbreak Udp\allowbreak Pinhole\allowbreak Table})]\label{law:turn-onion-bridge}
+Under \code{multi\_hop\_onion\_udp}, \code{Onion\allowbreak Udp\allowbreak Relay\allowbreak Factory} decouples the entry \code{Turn\allowbreak Allocation\allowbreak Core} ($A_{\max}=1024$, allocation lifetime $600\,\mathrm{s}$, $\le 64$ permissions per allocation) from socket egress by bridging each authenticated \code{Allocate} to a dedicated 5-hop guard-closed $\mathsf{udp}\in\Sigma_W$ loop ($\mathrm{Entry}\allowbreak\to g\allowbreak\to r_{0,2}\allowbreak\to \mathrm{Exit}\allowbreak\to r_{1,1}\allowbreak\to g\allowbreak\to \mathrm{Entry}$, encoding $\{\mathsf{Ipv4},\allowbreak\mathsf{Ipv6}\}\allowbreak\times\{\mathsf{Any},\allowbreak\mathsf{EvenPort}\}$ in \code{Onion\allowbreak Udp\allowbreak Bind\allowbreak Mode} and quantizing exit bind outcomes to $250\,\mathrm{ms}$) multiplexed over an ordered \code{OnionSession} stream and backed at the exit by \code{Onion\allowbreak Udp\allowbreak Pinhole\allowbreak Table} ($P_{\max}=256$, $T_{\mathrm{pin}}=300\,\mathrm{s}$, outbound cap $2\,048\,\mathrm{pkt/s}$, max datagram $65\,507\,\mathrm{B}$):
+\begin{enumerate}[leftmargin=1.5em]
+\item \emph{Single-use ticket coalescing:} Retransmitted UDP \code{Allocate} requests matching $(\text{five\_tuple},\mathrm{tx\_id},\mathrm{username})$ coalesce onto \code{PendingAllocate} (\code{CoalescePending} / \code{ReplayActive}) without double-spending $\tau_{\mathrm{tkt}}$ or spuriously returning \code{401}.
+\item \emph{Exit endpoint projection:} \code{XOR-RELAYED-ADDRESS} advertises the exit's bound external socket $E_{\mathrm{exit}}$ from \code{OnionUdpServerFrame::Bound} rather than the entry listener, so remote WebRTC peers exchange DTLS/SCTP UDP packets directly with $E_{\mathrm{exit}}$.
+\item \emph{Dual permission--pinhole gate:} An inbound UDP datagram from $\mathrm{IP}_{\mathrm{peer}}$ at time $t$ traverses the return loop iff both entry allocation permission and exit pinhole $\operatorname{allows}(\mathrm{IP}_{\mathrm{peer}},t)$ ($t_0+\min(\mathrm{ttl},T_{\mathrm{pin}})>t$) hold, dropping unsolicited scans at $E_{\mathrm{exit}}$ before consuming return SURBs or exit quota.
+\item \emph{Atomic capacity and lock-free teardown:} Pending and active allocations jointly satisfy $n_{\mathrm{pend}}+n_{\mathrm{act}}\le A_{\max}$ across async yields, completing opens abort cleanly after shutdown or client disconnect, and \code{begin\_close} wakes parked readers lock-free without orphan exit sessions.
+\end{enumerate}
+Because unmodified browser \code{RTCPeerConnection} clients send RFC~5766 \code{XOR-PEER-ADDRESS} permissions in cleartext to the TURN entry, Entry observes $(\mathrm{IP}_\diamond,E_{\mathrm{exit}},\mathrm{IP}_{\mathrm{peer}})$ on the control plane while remaining blind to $\mathrm{Did}_\diamond$, whereas Exit and remote peer $\mathrm{IP}_{\mathrm{peer}}$ remain blind to $\mathrm{IP}_\diamond$, $\mathrm{Did}_\diamond$, and Entry's IP under Entry--Exit non-collusion (full $\mathrm{IP}_\diamond\perp\mathrm{IP}_{\mathrm{peer}}$ entry/exit separation holds when native callers invoke \code{rings-node::onion::udp} directly without an RFC~5766 entry, trading $250\,\mathrm{ms}$ bind quantization and ordered-stream head-of-line delay against direct single-hop latency).
+\end{law}
+
+Table~\ref{tab:turn-privacy} summarizes observer knowledge across all three Rings TURN profiles; exhaustive BFS verification of Law~\ref{law:turn-onion-bridge} (\code{turn\_service::bridge}) and \code{TurnTcpBridge} (\code{transport::turn\_tcp}) appears in Section~\ref{sec:verification}.
+
+\begin{table}[htbp]
+\centering
+\caption{Observer knowledge across Rings TURN and \code{onion::udp} profiles (WebRTC DTLS/SCTP payloads remain end-to-end encrypted)}
+\label{tab:turn-privacy}
+\scriptsize
+\setlength{\tabcolsep}{2.8pt}
+\begin{tabular}{@{}p{1.85cm}>{\raggedright\arraybackslash}p{2.15cm}>{\raggedright\arraybackslash}p{1.85cm}>{\raggedright\arraybackslash}p{1.95cm}@{}}
+\toprule
+Profile & Entry \code{rings-turn} & Middle Relays & Exit \code{onion::udp} \\ \midrule
+\code{Did} / \code{Delegation} & $\mathrm{IP}_\diamond$, $\mathrm{IP}_{\mathrm{peer}}$, \code{Did} & --- (single-hop) & --- (local socket) \\
+Single-hop \code{tkt-} & $\mathrm{IP}_\diamond$, $\mathrm{IP}_{\mathrm{peer}}$, $\mathrm{pk}_e$ (no \code{Did}) & $16\,\mathrm{KiB}$ Sphinx cells (ticket only) & --- (local socket) \\
+Multi-hop TURN--\code{onion::udp} & $\mathrm{IP}_\diamond$, $E_{\mathrm{exit}}$, $\mathrm{IP}_{\mathrm{peer}}$ ctrl, $\mathrm{pk}_e$ (no \code{Did}, no peer UDP) & $16\,\mathrm{KiB}$ AEZ Sphinx cells only & $(E_{\mathrm{exit}},\mathrm{IP}_{\mathrm{peer}})$ only (no $\mathrm{IP}_\diamond$, no \code{Did}, no Entry IP) \\
+Direct native \code{onion::udp} & --- (client $\diamond\to g$ directly) & $16\,\mathrm{KiB}$ AEZ Sphinx cells ($g$ sees $\mathrm{IP}_\diamond$ only) & $(E_{\mathrm{exit}},\mathrm{IP}_{\mathrm{peer}})$ only ($\mathrm{IP}_\diamond\perp\mathrm{IP}_{\mathrm{peer}}$) \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \section{Decentralized Trust and Ranking --- DRanking Bridge}\label{sec:trust}
 
 \subsection{Sidecar Witness Ordering}
 
 \begin{definition}[Sidecar witness and partial order]
+For optional external finality anchoring (such as cross-epoch commitment roots in DRanking~2.0~\cite{RingsDRanking2026}), a sidecar witness orders attested events without consensus inside the overlay:
 \[
 \begin{aligned}
   w &= (domain,root,height,time,finality),\\
@@ -1709,7 +1759,7 @@ admission protocol~\cite{RingsDRanking2026}.
 \begin{definition}[Rings 1.0 Service Receipt (\code{ServiceReceipt})]\label{def:service-receipt}
 A service receipt is a dual-authenticated tuple
 \[
-  \rho=\bigl\langle\mathsf{ver},\,\mathsf{srv},\,a,\,b,\,k,\,n,\,d_{\mathrm{req}},\,d_{\mathrm{rsp}},\,\sigma_a,\,\sigma_b\bigr\rangle,
+  \mathsf{rcpt}=\bigl\langle\mathsf{ver},\,\mathsf{srv},\,a,\,b,\,k,\,n,\,d_{\mathrm{req}},\,d_{\mathrm{rsp}},\,\mathsf{sig}_a,\,\mathsf{sig}_b\bigr\rangle,
 \]
 implemented on live probe transcripts with distinct provider/beneficiary tags (\texttt{rings-core:\allowbreak service-receipt:\allowbreak provisional:\allowbreak\{provider,\allowbreak beneficiary\}}) and bridging into DRanking~2.0 under the finalized epoch separator $\mathtt{rings\mbox{-}service\mbox{-}receipt\mbox{-}v1\backslash 0}$, where:
 \begin{itemize}[leftmargin=1.5em]
@@ -1717,25 +1767,25 @@ implemented on live probe transcripts with distinct provider/beneficiary tags (\
 \item $a\in R$ is the service provider DID and $b\in R$ ($b\neq a$) is the served beneficiary DID;
 \item $k\in\mathbb{N}$ is the epoch index and $n$ is a fresh per-epoch nonce;
 \item $d_{\mathrm{req}},d_{\mathrm{rsp}}$ are the cryptographic digests of the exact signed request and completion transactions; and
-\item $\sigma_a,\sigma_b$ verify under the distinct account keys of $a$ and $b$ over $\mathtt{rings\mbox{-}service\mbox{-}receipt\mbox{-}v1\backslash 0}\Vert\allowbreak\mathsf{ver}\Vert\allowbreak\mathsf{srv}\Vert\allowbreak a\Vert b\Vert k\Vert n\Vert d_{\mathrm{req}}\Vert d_{\mathrm{rsp}}$.
+\item $\mathsf{sig}_a,\mathsf{sig}_b$ verify under the distinct account keys of $a$ and $b$ over $\mathtt{rings\mbox{-}service\mbox{-}receipt\mbox{-}v1\backslash 0}\Vert\allowbreak\mathsf{ver}\Vert\allowbreak\mathsf{srv}\Vert\allowbreak a\Vert b\Vert k\Vert n\Vert d_{\mathrm{req}}\Vert d_{\mathrm{rsp}}$.
 \end{itemize}
 \end{definition}
 
 \begin{proposition}[DRanking 2.0 Bridge Morphism~\cite{RingsDRanking2026}]\label{prop:dranking-bridge}
-Because forging $\sigma_b$ for an honest beneficiary $b\notin\mathsf{Adv}$ is
+Because forging $\mathsf{sig}_b$ for an honest beneficiary $b\notin\mathsf{Adv}$ is
 cryptographically infeasible, manufacturable receipts are restricted to
 adversarial self-dealing ($b\in\mathsf{Adv}$).  In the companion DRanking 2.0
 protocol~\cite{RingsDRanking2026}, distinct-nonce receipts $(k,n)$ for pair $(a,b)$
 fold into a cap-budgeted
 receipt matrix $W_k[b,a]\le w_{\max}$ with normalized stochastic flow
 $C_k[b,a]=W_k[b,a]/\max(w_{\max},W_k[b,\cdot]\mathbf{1})$. Assuming honest seed
-support ($\operatorname{supp}(s)\subseteq H$), uniformly bounded attenuation
+support ($\operatorname{supp}(s_{\mathrm{seed}})\subseteq H$), uniformly bounded attenuation
 ($\sup_k\alpha_k\le\alpha<1$), and initial adversarial weight
 $T_0(\mathsf{Adv})\le\frac{\alpha g}{1-\alpha}$, the
 seed-anchored attenuated PageRank/EigenTrust~\cite{PageRank,EigenTrust} epoch
 evolution preserves
 \[
-  t_{k+1}=\alpha_k\,C_k^{\mathsf{T}}t_k+(1-\alpha_k)\,s,
+  t_{k+1}=\alpha_k\,C_k^{\mathsf{T}}t_k+(1-\alpha_k)\,s_{\mathrm{seed}},
 \]
 \[
   T_k(\mathsf{Adv})=\sum_{v\in\mathsf{Adv}}t_k(v)\;\le\;\frac{\alpha g}{1-\alpha}
@@ -1762,7 +1812,7 @@ Table~\ref{security-table} maps each primary threat class in Rings~1.0 to its fa
 \toprule
 Attack & Predicate & Rings 1.0 + 2.0 Control \\ \midrule
 Sybil & many DIDs, one actor & \code{SlotRoster} cleanest-first floors + fair pool (Section~\ref{sec:load}); DRanking receipts~\cite{RingsDRanking2026} \\
-Replay & stale valid $\sigma$ & durable $(\mathcal{W}_s,\mathcal{K}_s)$, link-local $\mathcal{W}_{s,g}$, onion sliced-Bloom $R_i[x]$ \\
+Replay & stale valid $\mathsf{sig}$ & durable $(\mathcal{W}_s,\mathcal{K}_s)$, link-local $\mathcal{W}_{s,g}$, onion $R_i[x]$, TURN $\mathrm{sid}_{16}$ \\
 MITM & wrong key for DID & DID proof, \code{rings-delegation-v1}, \texttt{rings-core:\allowbreak data-entry:\allowbreak mutation} \\
 DoS & unbounded resource use & 5-table slot accounting, credit reclaim $\mathsf{Shrink}$, credit-time $\hat{\tau}$ floor \\
 Tagging & onion byte correlation & Sphinx 2870\,B header + AEZ v5 wide-block carry ($\tau=16$) \\
@@ -1770,23 +1820,25 @@ Tagging & onion byte correlation & Sphinx 2870\,B header + AEZ v5 wide-block car
 \end{tabular}
 \end{table}
 
-\begin{obligation}[Replay rejection]
+\begin{obligation}[Commit-before-dispatch replay rejection]
+Across every durable replay stream $(\mathcal{W}_s,\mathcal{K}_s)$, link-local window $\mathcal{W}_{s,g}$, and onion Bloom slice $R_i[x]$ (denoting the active replay set uniformly as $\mathcal{W}$):
 \[
 \begin{array}{rcl}
-\operatorname{accept}(s,\eta,t)
+\operatorname{accept}(\mathcal{W},\eta,t)
 &\Rightarrow&
-  \eta\notin Seen_s\land t<exp(s),\\
-Seen'_s&=&Seen_s\cup\{\eta\},\\
-\mathsf{emitDelivery}&<&Seen'_s.
+  \eta\notin \mathcal{W}\land t<\operatorname{exp}(\eta),\\
+\mathcal{W}'&=&\mathcal{W}\cup\{\eta\},\\
+\mathcal{W}'&<&\mathsf{emitDelivery}(\eta),
 \end{array}
 \]
+so replay state $\mathcal{W}'$ commits before payload delivery or carry decryption executes.
 \end{obligation}
 
 \section{Evaluations and Formal Verification}\label{sec:verification}
 
 \subsection{Experimental Setup and Reproducibility}\label{sec:eval-setup}
 
-All empirical benchmarks and formal-verification explorers in this section were executed directly against the shipped Rust transition reducers and networking crates of Rings~1.0 (workspace version \code{1.0.0-pre.8}, commit \code{6b5a3434}; source and reproduction commands in \code{papers/README.md} at \url{https://github.com/RingsNetwork/rings}) on an Apple M1 Max workstation (10~ARM64 cores, $64\,\text{GiB}$ RAM, Darwin~27.0.0) using \code{rustc 1.97.0} and hardware ARMv8 AES/POLYVAL instructions enabled via \code{.cargo/config.toml} (\code{--cfg aes\_armv8 --cfg polyval\_armv8}). Pure overlay/CRDT/storage benchmarks and all 16 Stateright/BFS model-checking reporters ran under \code{--profile ci} (\code{opt-level=3}, release assertion semantics preserved), whereas AEZ~v5 cipher microbenchmarks (\code{rings-aez}), multi-flow gateway harnesses (\code{rings-gateway}), and Sphinx/Bloom/live 5-node WebRTC loopback tests (\code{rings-node}) ran sequentially (\code{--test-threads=1}) under full \code{--release} (\code{opt-level=3}, fat LTO).
+All empirical benchmarks and formal-verification explorers in this section were executed directly against the shipped Rust transition reducers and networking crates of Rings~1.0 (workspace version \code{1.0.0-pre.8}, evaluation baseline commit \code{6b5a3434}; source and reproduction commands in \code{papers/README.md} at \url{https://github.com/RingsNetwork/rings}) on an Apple M1 Max workstation (10~ARM64 cores, $64\,\text{GiB}$ RAM, Darwin~27.0.0) using \code{rustc 1.97.0} and hardware ARMv8 AES/POLYVAL instructions enabled via \code{.cargo/config.toml} (\code{--cfg aes\_armv8 --cfg polyval\_armv8}). Pure overlay/CRDT/storage benchmarks and all 16 Stateright/BFS model-checking reporters ran under \code{--profile ci} (\code{opt-level=3}, release assertion semantics preserved), whereas AEZ~v5 cipher microbenchmarks (\code{rings-aez}), multi-flow gateway harnesses (\code{rings-gateway}), and Sphinx/Bloom/live 5-node WebRTC loopback tests (\code{rings-node}) ran sequentially (\code{--test-threads=1}) under full \code{--release} (\code{opt-level=3}, fat LTO).
 
 \subsection{Stateright State Relation and Quantitative Formal Verification}
 
@@ -1827,7 +1879,7 @@ Across all four model-checked workspace crates, exhaustive BFS state-space explo
 \code{core::finger\_retry} & Stage 5 resource-law explorer (depth 9) & 134,371 & --- & 839.98 & Single owner, monotone epochs, $\le K{+}1$ stab fan-out (479,544 trans.) \\
 \code{core::rejoin\_model} & Stage 6 (6 overlays; Table~\ref{tab:rejoin-bfs}) & 2,474,679 & 4 / 4 & 53,091.65 & Inert retired gens, unavailable-head swap, repair on vacate (CE: 10--788) \\
 \code{core::relay\_custody} & Stage 7 storage-less run & 192 & --- & 37.32 & Single-use query token, 2,496 transitions, ack-gated leave handoff \\
-\code{core::repair\_model} & Virtual (1c) + Handoff (1c, 2c crashes) & 21,105 & 4 / 4 & 880.39 & Replicated mail handoff safety, $r$-member convergence \\
+\code{core::repair\_model} & Virtual (1c) + Handoff (1c, 2c crashes) & 21,105 & 4 / 4 & 880.39 & Replicated mail handoff safety, $r_{\mathrm{rep}}$-member convergence \\
 \code{core::horizon\_model} & 512 seeds $\times$ 200 interleaved steps & (102,400 trans.) & 7 / 7 & 5,042.84 & Theorem~\ref{theo:no-resurrection} (No Resurrection) under $t\ge\tau(r)+H+\sigma$ \\
 \code{core::durability} & 4 auth.\ modes $\times$ \code{put}/\code{rem}/\code{batch} & 53 pfx (80 out.) & --- & 0.015 & Lattice $C\times M$, \code{.p} presence witness, $\mathrm{put}^*$ undo rollback \\
 \code{core::resource\_order} & Unbounded (49,542) + Capped-2 (58,506) & 108,048 & 7 / 7 & 1,482.72 & Bounded priority fair scheduling across control/interactive/bulk \\
@@ -1841,7 +1893,7 @@ Across all four model-checked workspace crates, exhaustive BFS state-space explo
 \code{node::session\_order} & Reorder (16,481) + SurbPool (2,540) & 19,021 & 2 / 2 & 737.42 & Exact forward/reply sequence delivery \& least-expiry SURB drain \\
 \code{node::lease\_readiness} & LeaseFresh (179,574) + ReadinessLatch (4,897) & 184,471 & 2 / 2 & 460.41 & Admissible \code{SignedDescriptor} bounds \& startup readiness latch \\
 \midrule
-\code{turn\_service::bridge} & TURN-Onion UDP bridge BFS (depth 6) & 2,773 & 6 / 6 & 10.97 & UDP session binding, allocation expiry, \& byte-cap safety \\
+\code{turn\_service::bridge} & TURN-Onion UDP bridge BFS (depth 6) & 2,773 & 6 / 6 & 10.97 & Ticket \code{Allocate} coalescing, $E_{\mathrm{exit}}$ proj., dual pinhole \& teardown \\
 \midrule
 \textbf{Total / Aggregate} & \textbf{16 model suites + 1,931 AEZ v5 KATs} & \textbf{9,496,521} & \textbf{54 / 54} & \textbf{101,134.76} & \textbf{Zero invariant violations across production reducers} \\
 \bottomrule
@@ -2172,13 +2224,14 @@ Non-transitive bridge-delegated route & $\le 2|V|$ hops worst-case; $\le 3$ hops
 CRDT carrier tombstones / wire size & $T_{\max}=1024$;\ $W=33.73\,\text{MB}\le 60\,\text{MB}$ \\
 Registry heartbeat tombstones / reads & $0$ tombstones, $0$ reads (\code{Extend} lease) \\
 Group commit \code{put*} flushes / latency & $1$ drive barrier per batch;\ $0.601\,\text{ms/rec}$ ($B{=}128$) \\
-Replicated relay chain repair delay & $D\le T_d+r\delta$ ($T_d\le 10\,\text{s}$ silent, $0\,\text{s}$ graceful) \\
+Replicated relay chain repair delay & $D\le T_d+r_{\mathrm{rep}}\delta$ ($T_d\le 10\,\text{s}$ silent, $0\,\text{s}$ graceful) \\
 Connection slot roster capacity $\mathcal{R}(s)$ & $2(F+s+1)=330$ ($s=4$) or $328$ ($s=3$) \\
 Node-wide frame liability $B_F(s)$ & $\mathcal{R}(s)(W+3)+\mathcal{P}_F=6\,526$ ($s=4$); $6\,488$ ($s=3$) \\
 Open chunk reassembly buffer $B_O(4)$ & $330\times 256\,\text{KiB}+128\,\text{MiB}=210.5\,\text{MiB}\le 256\,\text{MiB}$ \\
-Onion loop hops $H(n,s)$ / header $|\chi|$ & $H=(s+1)n+s\le 14$;\ $|\chi|=2919\,\text{B}$ ($\ell=205\,\text{B}$) \\
-Onion replay Bloom filter FP / memory & $\le 2^{-20}$ ($K=26, M=23\,680$);\ $4.70\,\text{MiB}$ ($64$ blks) \\
+Onion loop hops $H(n,s_{\mathrm{seg}})$ / header $|\chi|$ & $H=(s_{\mathrm{seg}}+1)n+s_{\mathrm{seg}}\le 14$;\ $|\chi|=2919\,\text{B}$ ($\ell=205\,\text{B}$) \\
+Onion replay Bloom filter FP / memory & $\le 2^{-20}$ ($K=26, m_{\mathrm{slice}}=23\,680$);\ $4.70\,\text{MiB}$ ($64$ blks) \\
 Onion $16\,\text{KiB}$ SURB batch / rate & $k=4$ ($5$ credits/loop);\ $1.32\,\text{MB/s}$ link ceiling ($1.045\,\text{MB/s}$ live) \\
+TURN--Onion reservations / pinholes & $R_{\max}=256$ ($60\,\text{s}$);\ $A_{\max}=1024$;\ $P_{\max}=256$ ($250\,\text{ms}$ bind) \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -2187,9 +2240,9 @@ Onion $16\,\text{KiB}$ SURB batch / rate & $k=4$ ($5$ credits/loop);\ $1.32\,\te
 
 Four methodological boundaries qualify the empirical and verification results reported in this section:
 \begin{itemize}[leftmargin=1.5em]
-\item \emph{Single-host local execution environment:} Throughput and durability benchmarks ran on one Apple M1 Max workstation using in-memory overlay simulations, local APFS \code{F\_FULLFSYNC} barriers, and a 5-node loopback WebRTC/SCTP harness; geo-distributed WAN latency, asymmetric packet loss, hairpinned NAT traversal, and multi-browser Wasm/IndexedDB variance are deferred to multi-host testbed evaluation.
+\item \emph{Single-host local execution environment and point dispersion:} Throughput and durability benchmarks ran on one Apple M1 Max workstation using in-memory overlay simulations, local APFS \code{F\_FULLFSYNC} barriers, and a 5-node loopback WebRTC/SCTP harness (reporting point means on deterministic microbenchmarks and $n\in\{3,6\}$ runs on live WebRTC loopback); geo-distributed WAN latency, multi-hop \code{onion::udp} ordered-stream head-of-line delay under loss, hairpinned NAT traversal, and multi-browser Wasm/IndexedDB tail quantiles are deferred to multi-host testbed evaluation.
 \item \emph{Static-ring scaling vs.\ continuous live churn:} Figure~\ref{fig:finger-scaling} quantifies range-proved convergence on fixed $N$-node rings up to $N=1\,024$; under sustained high churn, overlapping epoch invalidations require range revalidation (Section~\ref{sec:finger-convergence}) alongside the bridge delegation fallback (Theorem~\ref{theo:bridge-safety}).
-\item \emph{Non-transitive clique capacity:} Passive 1-hop \code{TopoInfo} hints guarantee $100\%$ cross-clique delivery without loops for $C_{\mathrm{sub}}\le K=4$, remaining strictly loop-free ($0\%$ loops) beyond $2K=8$ articulation peers (Table~\ref{tab:two-clique}); larger Symmetric-NAT or UDP-blocked cliques form direct WebRTC edges without centralized servers via Rings' DHT-discovered stateless cryptographic UDP/TCP TURN (\code{rings-turn}) and split-trust multi-hop \code{onion::udp} Onion TURN (\code{rings-turn-service}).
+\item \emph{Non-transitive clique capacity:} Passive 1-hop \code{TopoInfo} hints guarantee $100\%$ cross-clique delivery without loops for $C_{\mathrm{sub}}\le K=4$, remaining strictly loop-free ($0\%$ loops) beyond $2K=8$ articulation peers (Table~\ref{tab:two-clique}); larger Symmetric-NAT or UDP-blocked cliques form direct WebRTC edges without centralized credential servers via Rings' DHT-discovered zero-database UDP/TCP TURN (\code{rings-turn}) and exit-blinded multi-hop \code{onion::udp} TURN relay (\code{rings-turn-service}; Section~\ref{sec:turn-onion}).
 \item \emph{Finite-state model-checking bounds:} Stateright/BFS verification exhaustively checks bounded configurations and finite queue depths (Table~\ref{tab:formal-verification}), whereas unbounded majority Sybil capture and economic equilibrium fall outside Rings~1.0 and rely on the companion DRanking~2.0 admission layer (Section~\ref{sec:trust}).
 \end{itemize}
 
@@ -2238,7 +2291,7 @@ Rings is an algebraic structured peer-to-peer network: structured because owners
 \mathsf{Storage} &= \mathsf{E}(x)\sqcup\mathsf{R}(x),\ \tau_{\mathrm{HLC}}=(w,c,o),\ T_{\max}=1024,\\
 \mathsf{Durability} &= (c,m)\in C\times M,\ \mathrm{put}^*,\ (\mathcal{W}_s,\mathcal{K}_s),\\
 \mathsf{Admission} &= \mathsf{SlotRoster}(\mathcal{R}),\ f_T+\lfloor\mathcal{P}_T/\mathcal{R}(s)\rfloor,\\
-\mathsf{Privacy} &= \mathbf{Kl}(M)\ \text{Sphinx/AEZ-v5}\ (\Sigma,\ H\le 14),\\
+\mathsf{Privacy} &= \mathbf{Kl}(\mathcal{M})\ \text{Sphinx/AEZ}+\mathsf{TURN}\ (\Sigma,H\le 14),\\
 \mathsf{Trust} &= \mathsf{ServiceReceipt}\to\mathsf{DRanking\ 2.0}.
 \end{aligned}
 \]
